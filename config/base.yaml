@@ -1,0 +1,70 @@
+app:
+  name: "trading-system"
+  timezone: "Asia/Seoul"
+
+# 어떤 "부품"을 쓸지는 전부 여기서 문자열로 결정합니다.
+# 나중에 실제 키움 MCP가 준비되면 provider 값만 바꾸면 됩니다. (코드 수정 불필요)
+data:
+  provider: "kiwoom_rest"  # dummy(가짜, 테스트용) | kiwoom_rest(실데이터, 지금 기본) | kiwoom_mcp(향후)
+  db_path: "${DATA_DIR}/market_data.db"
+  rate_limit_sleep_sec: 0.3   # collect_all.py가 종목마다 대기하는 시간(초). 키움 API 호출 제한 보호용.
+  universe:
+    markets: ["0", "10"]       # 0=코스피, 10=코스닥 (collect_universe.py 기본값)
+  intraday:
+    minute_scope: "1"          # collect_all.py --minute 기본 분봉 간격
+    tick_scope: "1"            # collect_all.py --tick 기본 틱 간격
+  history:
+    max_pages_daily: 20        # 일봉 연속조회 최대 페이지 수 (장기 백테스트용, 넉넉하게)
+    max_pages_intraday: 3      # 분봉/틱 연속조회 최대 페이지 수 (collect_all.py가 전 종목을
+                                # 순회할 때 API 호출이 페이지 수만큼 곱해지므로 보수적으로)
+
+broker:
+  # kiwoom_rest + kiwoom.is_mock=true 조합 = 키움 모의투자 서버로 실제 형식의 주문.
+  # 계좌 없이 배관만 검증하고 싶을 땐 provider를 paper로 바꾸세요 (자체 가상 잔고).
+  provider: "kiwoom_rest"
+  starting_cash: 10000000  # paper 모드에서만 사용
+
+# provider가 kiwoom_rest일 때만 사용됩니다.
+kiwoom:
+  app_key: "${KIWOOM_APP_KEY}"
+  app_secret: "${KIWOOM_APP_SECRET}"
+  is_mock: true             # true=모의투자(mockapi.kiwoom.com), false=실전(api.kiwoom.com)
+
+strategy:
+  name: "ma_cross"         # 1단계: 단순 이동평균 교차 규칙 (assignments에 없는 종목의 기본값)
+  params:
+    short_window: 5
+    long_window: 20
+  # 종목별로 다른 전략을 쓰고 싶으면 여기에 추가하세요. 비워두면 전 종목이 위 기본값을 씁니다.
+  # assignments:
+  #   005930:
+  #     name: "ma_cross"
+  #     params: { short_window: 3, long_window: 15 }
+
+# 실시간 웹소켓 체결가 수집 (src/realtime/stream_collector.py). 사용 전 `kiwoomcli setup` 필요.
+realtime:
+  default_codes: []          # run.bat realtime 실행 시 인자를 안 주면 이 목록 사용
+
+risk:
+  # 아래 세 값은 "최초 기본값"입니다. 대시보드(pages/3_리스크_설정.py)에서 바꾸면 DB의
+  # settings 테이블에 저장되고, 그게 있으면 이 값보다 우선합니다 (live_trade.py가 매
+  # 확인 주기마다 다시 읽으므로 재시작 없이 반영됩니다). 대시보드에서 한 번도 안
+  # 바꿨으면 이 값 그대로 씁니다.
+  max_position_pct: 10     # 종목당 최대 비중(%) — 고정된 총자본(broker.get_total_deposit()) 기준
+  risk_limit_pct: 2        # 1회 매매당 최대 손실 허용(%) — 백테스트/라이브 모두 이 선에 닿으면 강제 손절합니다.
+  max_concurrent_positions: 5  # live_trade.py 전용: 동시 보유 최대 종목 수 (10% x 5종목 = 최대 총 노출 50%)
+
+# 백테스트 전용 비용 가정치. 여기 없으면 백테스트 수익률이 실제보다 낙관적으로 나옵니다.
+# fee_rate/tax_rate는 실제 증권사 수수료·현재 세율로 맞춰서 쓰세요 (예시값입니다).
+backtest:
+  fee_rate: 0.00015        # 매수/매도 각각에 붙는 위탁수수료율
+  tax_rate: 0.0018         # 매도 시에만 붙는 증권거래세율
+  slippage_rate: 0.001     # 신호가 난 종가와 실제 체결가 사이의 가정 괴리율
+  benchmark_code: "001"    # 알파 계산 기준 지수. 001=코스피 종합, 101=코스닥 종합 (collect_index.py로 수집)
+
+llm:
+  enabled: false           # 3단계에서 true로 전환 예정
+  provider: "none"         # none | local_gemma(향후, 이미 만들어둔 gemma-2-9b 연결 지점)
+
+logging:
+  level: "INFO"

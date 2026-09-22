@@ -1,0 +1,4 @@
+# 회사(D드라이브) 컴퓨터 전용 override
+paths:
+  data_dir: "${DATA_DIR}"
+  log_dir: "${LOG_DIR}"

@@ -1,0 +1,10 @@
+.env
+data/
+logs/
+__pycache__/
+*.pyc
+*.db
+.agents/skills/developing-with-streamlit
+start_dashboard.bat
+trading-system.zip
+.claude/

@@ -1,0 +1,8 @@
+python-dotenv>=1.0.0
+PyYAML>=6.0
+pandas>=2.0.0
+numpy>=1.24.0
+kiwoom-client[pandas]>=0.4.0   # 실시간 웹소켓 수집기(src/realtime)도 이 라이브러리의 KiwoomWebSocket을 직접 씀
+streamlit>=1.30.0
+plotly>=5.18.0
+# 향후 로컬 LLM(llama-cpp-python 등) 연동 시 여기 추가
