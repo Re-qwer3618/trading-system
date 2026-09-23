@@ -15,10 +15,8 @@ from datetime import datetime
 from zoneinfo import ZoneInfo
 import streamlit as st
 import pandas as pd
-import plotly.graph_objects as go
-from plotly.subplots import make_subplots
-
 from ui_common import require_login, render_header
+from ui_charts import kiwoom_candle_chart, kiwoom_orderbook_html
 from config_loader import load_config
 from data_layer.storage import MarketDataStore
 from close_day import _ticks_to_minute_bars  # 실시간 틱 -> 1분봉, close_day.py와 같은 로직 재사용
@@ -130,22 +128,14 @@ with main_col:
         st.info(f"{selected}의 저장된 데이터가 없습니다. `run.bat collect {selected}`를 먼저 실행해주세요.")
     else:
         df["date"] = pd.to_datetime(df["date"])
-        df = df.tail(120)  # 최근 120거래일만
-
-        fig = make_subplots(
-            rows=2, cols=1, shared_xaxes=True, row_heights=[0.75, 0.25], vertical_spacing=0.03,
-        )
-        fig.add_trace(go.Candlestick(
-            x=df["date"], open=df["open"], high=df["high"], low=df["low"], close=df["close"],
-            name=selected, increasing_line_color="#EF4444", decreasing_line_color="#3B82F6",
-        ), row=1, col=1)
-        fig.add_trace(go.Bar(x=df["date"], y=df["volume"], name="거래량", marker_color="#4B5563"), row=2, col=1)
-        fig.update_layout(
-            height=520, template="plotly_dark", xaxis_rangeslider_visible=False,
-            margin=dict(l=10, r=10, t=10, b=10), showlegend=False,
-        )
-        st.plotly_chart(fig, use_container_width=True)
-        st.caption(f"데이터 기간: {df['date'].min().date()} ~ {df['date'].max().date()}")
+        opt_a, opt_b = st.columns([3, 1])
+        visible = opt_a.select_slider("표시 봉 수", options=[60, 120, 200, 300], value=120)
+        dark_chart = opt_b.toggle("어두운 배경", key="chart_dark")
+        # 이동평균은 전체 기간으로 계산하고 화면에는 최근 visible개만 (120일선이 첫 봉부터 보이도록)
+        fig = kiwoom_candle_chart(df, "date", visible_bars=visible, dark=dark_chart)
+        st.plotly_chart(fig, use_container_width=True, config={"scrollZoom": True, "displaylogo": False})
+        shown = df.tail(visible)
+        st.caption(f"데이터 기간: {shown['date'].min().date()} ~ {shown['date'].max().date()} · 휠로 확대/축소, 드래그로 이동")
 
 # ---------------------------------------------------------------------------
 # 우측: 시장 지표 미니 차트 (Mock)
@@ -168,8 +158,18 @@ st.markdown("---")
 st.subheader(f"⚡ {selected} 실시간 분봉 · 호가창")
 
 
+def _reference_price(symbol: str) -> float | None:
+    """호가 색/등락률 기준가 = 오늘 이전 마지막 일봉 종가 (HTS의 전일종가)."""
+    daily = store.load(symbol)
+    if daily.empty:
+        return None
+    today = datetime.now(ZoneInfo("Asia/Seoul")).strftime("%Y-%m-%d")
+    prev = daily[pd.to_datetime(daily["date"]).dt.strftime("%Y-%m-%d") < today]
+    return float(prev.iloc[-1]["close"]) if not prev.empty else None
+
+
 @st.fragment(run_every="2s")
-def _render_realtime_section(symbol: str):
+def _render_realtime_section(symbol: str, ref_price: float | None):
     ticks = store.recent_realtime_ticks(symbol, limit=500)
     chart_col, book_col = st.columns([2, 1])
 
@@ -183,16 +183,12 @@ def _render_realtime_section(symbol: str):
             if bars.empty:
                 st.info("체결은 들어오고 있는데 아직 1분봉을 채울 만큼 쌓이지 않았습니다.")
             else:
-                fig = go.Figure(data=[go.Candlestick(
-                    x=bars["timestamp"], open=bars["open"], high=bars["high"],
-                    low=bars["low"], close=bars["close"],
-                    increasing_line_color="#EF4444", decreasing_line_color="#3B82F6",
-                )])
-                fig.update_layout(
-                    height=320, template="plotly_dark", xaxis_rangeslider_visible=False,
-                    margin=dict(l=10, r=10, t=10, b=10), showlegend=False,
+                fig = kiwoom_candle_chart(
+                    bars, "timestamp", ma_periods=(5, 20), x_label_fmt="%H:%M", tick_label_fmt="%H:%M", height=380,
+                    dark=st.session_state.get("chart_dark", False),
                 )
-                st.plotly_chart(fig, use_container_width=True, key=f"rt_chart_{symbol}")
+                st.plotly_chart(fig, use_container_width=True, key=f"rt_chart_{symbol}",
+                                config={"displaylogo": False})
             last = ticks.iloc[-1]
             st.caption(f"최근 체결: {float(last['price']):,.0f}원 · 최근 {len(ticks)}틱 · 마지막 수신 {last['received_at']}")
 
@@ -201,16 +197,17 @@ def _render_realtime_section(symbol: str):
         if not book:
             st.info("실시간 호가 데이터가 아직 없습니다.")
         else:
-            asks = pd.DataFrame(book["asks"][:10], columns=["가격", "잔량"]).iloc[::-1].reset_index(drop=True)
-            bids = pd.DataFrame(book["bids"][:10], columns=["가격", "잔량"])
-            st.caption(f"매도호가 (총잔량 {book['total_ask_qty']:,})" if book["total_ask_qty"] else "매도호가")
-            st.dataframe(asks, hide_index=True, use_container_width=True, height=180)
-            st.caption(f"매수호가 (총잔량 {book['total_bid_qty']:,})" if book["total_bid_qty"] else "매수호가")
-            st.dataframe(bids, hide_index=True, use_container_width=True, height=180)
-            st.caption(f"호가시각 {book['ts']} · 마지막 수신 {book['received_at']}")
+            last_price = float(ticks.iloc[-1]["price"]) if not ticks.empty else None
+            st.markdown(
+                kiwoom_orderbook_html(book, ref_price=ref_price, last_price=last_price,
+                                      dark=st.session_state.get("chart_dark", False)),
+                unsafe_allow_html=True,
+            )
+            ref_note = f"기준가(전일종가) {ref_price:,.0f}" if ref_price else "기준가 없음 (일봉 수집 필요)"
+            st.caption(f"{ref_note} · 호가시각 {book['ts']} · 마지막 수신 {book['received_at']}")
 
 
-_render_realtime_section(selected)
+_render_realtime_section(selected, _reference_price(selected))
 
 st.markdown("---")
 
