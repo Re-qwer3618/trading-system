@@ -13,6 +13,7 @@ from config_loader import load_config
 from data_layer.storage import MarketDataStore
 from core.factory import build_broker, build_strategy, build_llm_advisor
 from risk.risk_manager import RiskManager
+from agents.decision_maker import DecisionMaker
 
 logging.basicConfig(level="INFO", format="%(asctime)s [%(levelname)s] %(message)s")
 log = logging.getLogger(__name__)
@@ -48,8 +49,31 @@ def main():
         return
 
     signal = strategy.generate_signal(symbol, df)
-    opinion = llm_advisor.get_opinion(symbol, context=f"{symbol} 규칙기반 신호: {signal}")
+    # 튜닝 성공/실패 이력을 컨텍스트에 같이 넘겨둡니다. 지금은 NoOpAdvisor라 안 쓰이지만,
+    # 나중에 llm/advisor.py에 실제 LLM을 붙이면 "이 종목/이 설정은 과거에 이랬다"는 걸
+    # 그대로 참고할 수 있습니다 (tuning/analyst_tuner.py, storage.tuning_llm_context 참고).
+    tuning_context = store.tuning_llm_context(symbol, "history")
+    opinion = llm_advisor.get_opinion(
+        symbol, context=f"{symbol} 규칙기반 신호: {signal}\n{tuning_context}"
+    )
     log.info(f"[{symbol}] 규칙기반 신호: {signal} | LLM 참고의견: {opinion['stance']} ({opinion['reasoning']})")
+
+    # 4-역할 위원회(과거/현재/비교 분석가 + 최종 결정권자). config["decision"]["enabled"]가
+    # false(기본값)면 완전히 건너뛰어 기존 동작과 100% 동일합니다.
+    if config.get("decision", {}).get("enabled", False):
+        committee = DecisionMaker(store, config).decide(symbol)
+        log.info(
+            f"[{symbol}] 위원회 최종판단: {committee['action']} (확신도 {committee['confidence']}%) "
+            f"| 위원별 의견: {committee['votes']}"
+        )
+        store.log_decision_committee(symbol, committee["action"], committee["confidence"],
+                                      committee["votes"], committee["reasoning"])
+        if signal == "BUY" and committee["action"] == "SELL":
+            log.info("위원회가 매도 우세로 판단해 매수 신호를 보류(HOLD)합니다.")
+            signal = "HOLD"
+        elif signal == "SELL" and committee["action"] == "BUY":
+            log.info("위원회가 매수 우세로 판단해 매도 신호를 보류(HOLD)합니다.")
+            signal = "HOLD"
 
     action = "NONE"
     detail = ""

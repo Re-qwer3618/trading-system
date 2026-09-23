@@ -23,7 +23,7 @@ def main():
     symbol = sys.argv[1] if len(sys.argv) > 1 else "005930"
 
     store = MarketDataStore(config["data"]["db_path"])
-    analyst = HistoryAnalyst(store)
+    analyst = HistoryAnalyst(store, config.get("analysts", {}).get("history"))
     result = analyst.analyze(symbol)
 
     print(json.dumps(result, ensure_ascii=False, indent=2))

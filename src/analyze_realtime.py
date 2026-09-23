@@ -24,7 +24,7 @@ def main():
     interval_sec = float(sys.argv[2]) if len(sys.argv) > 2 else 5.0
 
     store = MarketDataStore(config["data"]["db_path"])
-    analyst = RealtimeAnalyst(store)
+    analyst = RealtimeAnalyst(store, config.get("analysts", {}).get("realtime"))
 
     log.info(f"[{symbol}] 실시간 분석 감시 시작 ({interval_sec}초 간격, Ctrl+C로 종료)")
     try:

@@ -166,6 +166,64 @@ class MarketDataStore:
                     added_at TEXT NOT NULL
                 )
             """)
+            # 4-역할 위원회(agents/decision_maker.py)의 최종 판단 로그.
+            # 기존 decisions 테이블(전략 신호+주문 실행 기록)과는 별개로,
+            # "위원회가 무슨 근거로 어떤 결론을 냈는지"만 따로 남깁니다.
+            conn.execute("""
+                CREATE TABLE IF NOT EXISTS decision_committee (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    timestamp TEXT NOT NULL,
+                    symbol TEXT NOT NULL,
+                    action TEXT,
+                    confidence REAL,
+                    votes TEXT,
+                    reasoning TEXT
+                )
+            """)
+            # 백테스트 기반 파라미터 튜닝(src/tuning/analyst_tuner.py) 기록.
+            # "위원 교육"의 성공/실패 이력 — 나중에 LLM에게 그대로 컨텍스트로 넘길 수 있도록
+            # param_set은 JSON, summary는 사람이 읽는 한 줄 요약으로 같이 저장합니다.
+            conn.execute("""
+                CREATE TABLE IF NOT EXISTS tuning_runs (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    timestamp TEXT NOT NULL,
+                    symbol TEXT NOT NULL,
+                    analyst TEXT NOT NULL,
+                    param_set TEXT NOT NULL,
+                    start_date TEXT,
+                    end_date TEXT,
+                    total_return_pct REAL,
+                    benchmark_return_pct REAL,
+                    num_trades INTEGER,
+                    win_rate_pct REAL,
+                    max_drawdown_pct REAL,
+                    outcome TEXT,
+                    summary TEXT
+                )
+            """)
+            conn.execute(
+                "CREATE INDEX IF NOT EXISTS idx_tuning_runs_lookup "
+                "ON tuning_runs(symbol, analyst, id DESC)"
+            )
+            # 같은 파라미터 조합이 나중에 다시 튜닝됐을 때 성공<->실패가 뒤집힌 경우만 기록.
+            # (시장 국면이 바뀌어서 예전에 잘 되던 설정이 더는 안 통한다는 신호)
+            conn.execute("""
+                CREATE TABLE IF NOT EXISTS tuning_transitions (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    timestamp TEXT NOT NULL,
+                    symbol TEXT NOT NULL,
+                    analyst TEXT NOT NULL,
+                    param_set TEXT NOT NULL,
+                    previous_run_id INTEGER,
+                    previous_outcome TEXT,
+                    previous_period TEXT,
+                    new_run_id INTEGER,
+                    new_outcome TEXT,
+                    new_period TEXT,
+                    transition_type TEXT,
+                    summary TEXT
+                )
+            """)
 
     # ------------------------------------------------------------------
     # 기존 일봉 (변경 없음)
@@ -554,3 +612,168 @@ class MarketDataStore:
         if not self.get_watchlist():
             for s in symbols:
                 self.add_to_watchlist(s)
+
+    # ------------------------------------------------------------------
+    # 4-역할 위원회 판단 로그 (신규)
+    # ------------------------------------------------------------------
+
+    def log_decision_committee(self, symbol: str, action: str, confidence: float, votes: dict, reasoning: str):
+        """analyze_decision.py / main.py가 위원회 최종 결론을 남기는 곳. 대시보드가 이력을 보여줍니다."""
+        import json
+        with sqlite3.connect(self.db_path) as conn:
+            conn.execute(
+                """INSERT INTO decision_committee (timestamp, symbol, action, confidence, votes, reasoning)
+                   VALUES (?, ?, ?, ?, ?, ?)""",
+                (
+                    datetime.now().isoformat(timespec="seconds"),
+                    symbol, action, confidence,
+                    json.dumps(votes, ensure_ascii=False), reasoning,
+                ),
+            )
+
+    def recent_decision_committee(self, symbol: str | None = None, limit: int = 50) -> pd.DataFrame:
+        query = "SELECT timestamp, symbol, action, confidence, votes, reasoning FROM decision_committee"
+        params: list = []
+        if symbol:
+            query += " WHERE symbol = ?"
+            params.append(symbol)
+        query += " ORDER BY id DESC LIMIT ?"
+        params.append(limit)
+        with sqlite3.connect(self.db_path) as conn:
+            return pd.read_sql_query(query, conn, params=params)
+
+    # ------------------------------------------------------------------
+    # 백테스트 기반 위원 파라미터 튜닝 이력 (신규)
+    # ------------------------------------------------------------------
+
+    @staticmethod
+    def _param_set_key(param_set: dict) -> str:
+        """같은 파라미터 조합인지 비교하기 위한 정규화된 JSON 문자열 (키 정렬)."""
+        import json
+        return json.dumps(param_set, ensure_ascii=False, sort_keys=True)
+
+    def find_previous_tuning_run(self, symbol: str, analyst: str, param_set: dict) -> dict | None:
+        """같은 종목·같은 위원·완전히 같은 파라미터 조합으로 가장 최근에 튜닝했던 기록.
+        (지금 막 넣으려는 새 기록보다 먼저 있어야 하므로, 이 함수는 log_tuning_run 호출 *전에* 씁니다.)
+        """
+        import json
+        key = self._param_set_key(param_set)
+        with sqlite3.connect(self.db_path) as conn:
+            rows = conn.execute(
+                """SELECT id, timestamp, start_date, end_date, outcome, total_return_pct, benchmark_return_pct, param_set
+                   FROM tuning_runs WHERE symbol = ? AND analyst = ? ORDER BY id DESC""",
+                (symbol, analyst),
+            ).fetchall()
+        for row in rows:
+            if row[7] == key:
+                return {
+                    "id": row[0], "timestamp": row[1], "start_date": row[2], "end_date": row[3],
+                    "outcome": row[4], "total_return_pct": row[5], "benchmark_return_pct": row[6],
+                }
+        return None
+
+    def log_tuning_run(self, symbol: str, analyst: str, param_set: dict, start_date: str, end_date: str,
+                        metrics: dict, outcome: str, summary: str) -> int:
+        """튜닝(그리드서치) 한 번의 파라미터 조합 결과를 기록하고, 새로 생긴 행의 id를 반환합니다."""
+        import json
+        with sqlite3.connect(self.db_path) as conn:
+            cur = conn.execute(
+                """INSERT INTO tuning_runs
+                     (timestamp, symbol, analyst, param_set, start_date, end_date,
+                      total_return_pct, benchmark_return_pct, num_trades, win_rate_pct,
+                      max_drawdown_pct, outcome, summary)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                (
+                    datetime.now().isoformat(timespec="seconds"), symbol, analyst,
+                    self._param_set_key(param_set), start_date, end_date,
+                    metrics.get("total_return_pct"), metrics.get("benchmark_return_pct"),
+                    metrics.get("num_trades"), metrics.get("win_rate_pct"),
+                    metrics.get("max_drawdown_pct"), outcome, summary,
+                ),
+            )
+            return cur.lastrowid
+
+    def log_tuning_transition(self, symbol: str, analyst: str, param_set: dict, previous: dict,
+                               new_run_id: int, new_outcome: str, new_period: str, summary: str) -> int:
+        """같은 파라미터 조합의 성공/실패가 이전 기록과 달라졌을 때만 호출합니다 (뒤집힌 경우)."""
+        transition_type = f"{previous['outcome']}_TO_{new_outcome}"
+        previous_period = f"{previous['start_date']}~{previous['end_date']}"
+        with sqlite3.connect(self.db_path) as conn:
+            cur = conn.execute(
+                """INSERT INTO tuning_transitions
+                     (timestamp, symbol, analyst, param_set, previous_run_id, previous_outcome,
+                      previous_period, new_run_id, new_outcome, new_period, transition_type, summary)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                (
+                    datetime.now().isoformat(timespec="seconds"), symbol, analyst,
+                    self._param_set_key(param_set), previous["id"], previous["outcome"],
+                    previous_period, new_run_id, new_outcome, new_period, transition_type, summary,
+                ),
+            )
+            return cur.lastrowid
+
+    def param_set_flip_count(self, symbol: str, analyst: str, param_set: dict) -> int:
+        """이 파라미터 조합이 지금까지 성공<->실패로 뒤집힌 횟수 (많을수록 불안정한 설정)."""
+        key = self._param_set_key(param_set)
+        with sqlite3.connect(self.db_path) as conn:
+            row = conn.execute(
+                "SELECT COUNT(*) FROM tuning_transitions WHERE symbol = ? AND analyst = ? AND param_set = ?",
+                (symbol, analyst, key),
+            ).fetchone()
+            return row[0] if row else 0
+
+    def recent_tuning_runs(self, symbol: str | None = None, analyst: str | None = None, limit: int = 50) -> pd.DataFrame:
+        query = ("SELECT timestamp, symbol, analyst, param_set, start_date, end_date, total_return_pct, "
+                  "benchmark_return_pct, num_trades, win_rate_pct, max_drawdown_pct, outcome, summary "
+                  "FROM tuning_runs")
+        conditions, params = [], []
+        if symbol:
+            conditions.append("symbol = ?")
+            params.append(symbol)
+        if analyst:
+            conditions.append("analyst = ?")
+            params.append(analyst)
+        if conditions:
+            query += " WHERE " + " AND ".join(conditions)
+        query += " ORDER BY id DESC LIMIT ?"
+        params.append(limit)
+        with sqlite3.connect(self.db_path) as conn:
+            return pd.read_sql_query(query, conn, params=params)
+
+    def recent_tuning_transitions(self, symbol: str | None = None, analyst: str | None = None, limit: int = 50) -> pd.DataFrame:
+        query = ("SELECT timestamp, symbol, analyst, param_set, previous_outcome, previous_period, "
+                  "new_outcome, new_period, transition_type, summary FROM tuning_transitions")
+        conditions, params = [], []
+        if symbol:
+            conditions.append("symbol = ?")
+            params.append(symbol)
+        if analyst:
+            conditions.append("analyst = ?")
+            params.append(analyst)
+        if conditions:
+            query += " WHERE " + " AND ".join(conditions)
+        query += " ORDER BY id DESC LIMIT ?"
+        params.append(limit)
+        with sqlite3.connect(self.db_path) as conn:
+            return pd.read_sql_query(query, conn, params=params)
+
+    def tuning_llm_context(self, symbol: str, analyst: str, limit: int = 10) -> str:
+        """
+        지금까지의 튜닝 성공/실패 + 성공<->실패 전환 이력을 사람이 읽는 텍스트로 묶어서 반환합니다.
+        나중에 llm/advisor.py가 실제 LLM을 호출할 때 이 문자열을 context에 그대로 붙여넣으면,
+        "이 종목/이 위원은 과거에 이런 설정이 통했고, 이런 설정은 나중에 안 통하게 됐다"는
+        내용을 LLM이 참고할 수 있습니다.
+        """
+        runs = self.recent_tuning_runs(symbol, analyst, limit)
+        transitions = self.recent_tuning_transitions(symbol, analyst, limit)
+        lines = [f"[{symbol} / {analyst} 위원 튜닝 이력]"]
+        if runs.empty:
+            lines.append("- 튜닝 기록 없음")
+        else:
+            for _, r in runs.iterrows():
+                lines.append(f"- {r['summary']}")
+        if not transitions.empty:
+            lines.append("[성공/실패가 뒤집힌 이력 — 시장 국면 변화 가능성]")
+            for _, t in transitions.iterrows():
+                lines.append(f"- {t['summary']}")
+        return "\n".join(lines)

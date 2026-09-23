@@ -48,7 +48,10 @@
   - `MarketDataStore.sync_universe()` 추가 — 기존 `upsert_universe`는 새로 안 들어온 종목을 안 지웠는데(계속 남아있음), 이건 이번 실행에 없는 코드를 삭제까지 해서 필터가 진짜로 반영되게 함
   - `config.data.intraday.minute_scope`를 `"5"` → `"1"`로 변경 (5분봉 대신 1분봉)
   - **버그 수정**: `kiwoom_rest_provider.py`의 분봉/틱 파싱이 거래량 `None`을 그대로 `.astype(int)`에 넣어 죽는 버그가 있었습니다 (전체 수집 중 100종목이 이걸로 실패, `_to_int_volume()` 헬퍼로 NaN을 0으로 채우도록 수정, 재수집으로 100/100 복구 확인)
-- ⏳ **다음 단계 후보**: 신규 전략 추가(예: 변동성 돌파, 눌림목), 실현손익/승률 계산, LLM(gemma-2-9b)이 history/realtime 에이전트의 규칙기반 판단을 대체·보강, 외국인/기관 수급 데이터 추가, 포트폴리오(다종목 동시) 백테스트, 호가 데이터를 쓰는 분석/전략(스프레드·잔량 불균형 등), broker의 주문가를 실시간가 기준으로 바꾸기(현재 known limitation), 지수 요약 카드를 collect_index.py 실데이터로 교체(현재 Mock)
+- ✅ **4-역할 위원회 (매매 최종 결정권자)**: `agents/decision_maker.py`가 과거(`history_analyst`)/현재(`realtime_analyst`)/비교(`comparison_analyst`, 신규) 3명의 의견을 가중합해 BUY/SELL/HOLD + 확신도를 산출. `config.decision.enabled`로 `main.py` 매매 판단에 거부권(veto) 형태로 연결 가능 (기본 꺼짐, 기존 동작 불변)
+- ✅ **위원 판단 기준 config화**: 각 위원의 임계값(모멘텀%, 박스권%, 이동평균 기간 등)이 전부 `config/base.yaml`의 `analysts` 섹션으로 빠져서, 코드 수정 없이 조정 가능
+- ✅ **백테스트 기반 자동 튜닝 + 성공/실패 이력**: `run.bat tune-history`가 분석가-1(과거)의 이동평균 파라미터를 그리드서치해 `tuning_runs`/`tuning_transitions` 테이블에 성공/실패와 성공↔실패 전환을 기록하고, `--apply`로 1위 조합을 config에 바로 반영. 기록은 `MarketDataStore.tuning_llm_context()`로 LLM 연결 시 그대로 재사용 가능하도록 설계
+- ⏳ **다음 단계 후보**: 신규 전략 추가(예: 변동성 돌파, 눌림목), 실현손익/승률 계산, 실시간 급등락 알림→자동매매 연결, LLM(gemma-2-9b)이 각 위원(history/realtime/comparison)의 규칙기반 판단을 대체·보강, 위원회가 거부권을 넘어 직접 주문까지 내도록 확장, realtime/comparison 위원의 백테스트 튜닝(틱 데이터 축적 후)
 
 ## 왜 이런 구조인가
 
@@ -105,9 +108,15 @@ src/
   collect_index.py          시장 벤치마크(코스피/코스닥) 지수 일봉 수집 — 백테스트 알파 계산용
   analyze_history.py        과거 차트 분석 에이전트 CLI (agents/history_analyst.py)
   analyze_realtime.py       실시간 분석 에이전트 감시 CLI (agents/realtime_analyst.py)
+  analyze_decision.py       4-역할 위원회 전체 리포트 CLI (agents/decision_maker.py)
+  tune_analysts.py          백테스트 기반 위원 파라미터 튜닝 CLI (tuning/analyst_tuner.py)
   agents/
-    history_analyst.py      추세/변동성/박스권/거래량 규칙기반 분석 (LLM 붙일 자리)
-    realtime_analyst.py     단기 모멘텀/거래량 급증 규칙기반 분석 (LLM 붙일 자리)
+    history_analyst.py      [차트 분석가-1: 과거] 추세/변동성/박스권/거래량 규칙기반 분석 (LLM 붙일 자리)
+    realtime_analyst.py     [차트 분석가-2: 현재] 단기 모멘텀/거래량 급증 규칙기반 분석 (LLM 붙일 자리)
+    comparison_analyst.py   [차트 분석가-3: 비교] 과거 추세 vs 현재 모멘텀의 정합성 판단
+    decision_maker.py       [매매 최종 결정권자] 위 3명의 stance를 가중합해 BUY/SELL/HOLD 결정
+  tuning/
+    analyst_tuner.py         분석가-1 파라미터 그리드서치 + 성공/실패·전환 기록 + config 자동반영
   realtime/
     stream_collector.py     키움 웹소켓 체결가(0B)+호가잔량(0D) 한 세션에서 동시 수집 (kiwoom_client.KiwoomWebSocket 직접 사용)
   close_day.py               장마감 후 그날 실시간 틱을 종목별 1분봉/일봉으로 묶어 기존 저장소에 합침
@@ -333,6 +342,140 @@ run.bat analyze-realtime 005930 10     # 10초 간격
 `core/factory.py`의 `_STRATEGY_REGISTRY`에 한 줄 등록하면 됩니다 (`ma_cross`가
 등록된 방식과 동일).
 
+### 5) 4-역할 위원회 (매매 최종 결정권자 + 차트 분석가 3명)
+
+요청하신 역할 분담 구조입니다. 기존에 분리되어 있던 두 분석 에이전트를 "위원"으로
+재사용하고, "비교 분석가"와 "최종 결정권자"를 새로 추가해서 하나의 위원회로 묶었습니다.
+
+| 요청하신 역할 | 실제 구현 | 파일 |
+|---|---|---|
+| 차트 분석가-1 (과거 차트) | `HistoryAnalyst` (기존, 그대로 재사용) | `agents/history_analyst.py` |
+| 차트 분석가-2 (현재 차트) | `RealtimeAnalyst` (기존, 그대로 재사용) | `agents/realtime_analyst.py` |
+| 차트 분석가-3 (과거·현재 비교) | `ComparisonAnalyst` (신규) — 위 두 위원의 결과를 받아 "추세와 단기 흐름이 같은 얘기를 하는지"를 판단 | `agents/comparison_analyst.py` |
+| 매매 최종 결정권자 | `DecisionMaker` (신규) — 3명의 stance(POSITIVE/NEGATIVE/NEUTRAL)를 `config.decision.weights`로 가중합해서 BUY/SELL/HOLD + 확신도(%)를 결정 | `agents/decision_maker.py` |
+
+```
+run.bat analyze-decision 005930     # 위원회 전체 리포트(JSON) + 최종 결정 출력, decision_committee 테이블에도 기록
+```
+
+대시보드의 "차트 및 분석" 페이지에도 "🧭 매매 위원회 판단" 섹션이 추가되어, 선택한
+종목에 대해 버튼 한 번으로 4명의 의견을 카드 형태로 볼 수 있습니다.
+
+`main.py`(자동 매매 진입점)에는 `config/base.yaml`의 `decision.enabled`로 켜고 끌 수
+있는 안전장치로 연결해두었습니다. 기본값은 `false`라 지금까지의 동작(순수 규칙기반
+`strategy.generate_signal()`)은 전혀 바뀌지 않습니다. `true`로 켜면:
+
+- 기존 전략이 BUY 신호를 냈는데 위원회가 SELL 우세로 판단하면 → 이번엔 매수를 보류(HOLD)
+- 반대로 전략이 SELL인데 위원회가 BUY 우세면 → 매도를 보류(HOLD)
+- 위원회가 전략과 같은 방향이거나 중립이면 → 전략 신호 그대로 실행
+
+즉 지금은 "위원회가 전략을 거부권(veto)으로 보완"하는 구조입니다. 나중에 위원회
+쪽 확신도(`confidence`)가 충분히 높을 때는 위원회 판단만으로 직접 주문을 넣게
+하거나, `llm/advisor.py`처럼 위원회 안에 LLM을 네 번째 위원으로 추가하는 식으로
+확장할 수 있도록 `decide()`가 늘 같은 dict 형태(`action`, `confidence`, `votes`,
+`reports`)를 반환하게 설계했습니다.
+
+가중치/임계값은 `config/base.yaml`의 `decision` 섹션에서 조정합니다:
+
+```yaml
+decision:
+  enabled: false
+  buy_threshold: 0.4
+  sell_threshold: -0.4
+  weights:
+    history: 1.0
+    realtime: 1.0
+    comparison: 1.5
+```
+
+### 6) 위원 "교육" — 각 분석가의 판단 기준 조정
+
+규칙기반 시스템이라 ML/LLM식 학습은 아니고, 각 분석가가 쓰던 임계값(모멘텀 %,
+박스권 %, 이동평균 기간 등)을 코드에서 `config/base.yaml`의 `analysts` 섹션으로
+전부 빼뒀습니다. 즉 "교육"은 이 숫자들을 조정하는 것으로 합니다 — 코드 수정도,
+재배포도 필요 없습니다.
+
+```yaml
+analysts:
+  history:                        # 차트 분석가-1 (과거)
+    sma_short: 5
+    sma_mid: 20
+    sma_long: 60
+    volatility_window: 20
+    box_window: 60
+    volume_recent_days: 5
+    volume_prior_days: 20
+    min_bars_required: 20
+  realtime:                       # 차트 분석가-2 (현재)
+    lookback: 200
+    momentum_up_pct: 0.5          # 이 값(%)보다 오르면 "단기 급등" — 낮출수록 예민해짐
+    momentum_down_pct: -0.5
+    volume_spike_window: 20
+    volume_spike_alert_ratio: 2.0
+  comparison:                     # 차트 분석가-3 (비교)
+    box_breakout_high_pct: 90     # 박스권 상단 몇 %부터 "돌파 시도"로 볼지
+    box_breakout_low_pct: 10
+```
+
+값을 생략하면 각 `agents/*.py` 파일에 있던 기존 기본값이 그대로 쓰여서 하위호환이
+유지됩니다. 예:
+- 분석가-2가 잔파도에 너무 자주 반응한다 → `momentum_up_pct`/`momentum_down_pct`의
+  절대값을 0.5 → 0.8 등으로 올려서 둔감하게.
+- 분석가-1이 너무 늦게 추세 전환을 알아챈다 → `sma_long`을 60 → 40으로 줄여서
+  더 짧은 호흡으로 보게.
+- 분석가-3의 "박스권 돌파" 판정이 너무 자주 뜬다 → `box_breakout_high_pct`를
+  90 → 95로 올려서 더 보수적으로.
+
+진짜 "학습"(과거 데이터로 최적 임계값을 자동으로 찾는 것)은 아래 7번에서
+"차트 분석가-1 (과거)"에 한해 구현했습니다. LLM에게 자연어로 판단 성향을
+지시하는 것은 아직 없고, `llm/advisor.py` 슬롯에 실제 로컬 LLM을 연결하는
+작업을 별도로 진행해야 합니다 (TODO 참고). 다만 아래 튜닝 이력은 그 LLM이
+붙었을 때 바로 참고자료로 쓸 수 있도록 이미 준비해뒀습니다.
+
+### 7) 백테스트 기반 자동 튜닝 + 성공/실패 이력
+
+지금은 "차트 분석가-1 (과거, `history_analyst`)"의 추세 판정 파라미터
+(`sma_short`/`sma_mid`/`sma_long`)만 자동 튜닝됩니다. **왜 이 세 개만인가**:
+이 값들만 실제로 매수/매도 시점을 바꿔서 백테스트로 검증할 수 있고, 나머지
+(변동성/박스권/거래량 관련, 그리고 실시간·비교 분석가의 파라미터)는 과거
+틱 데이터가 아직 충분히 없어서 백테스트로 검증할 방법이 없습니다. 실시간
+수집기(`run.bat realtime`)로 틱 데이터가 쌓이면 같은 방식으로 확장할 수
+있게 `tuning/analyst_tuner.py`를 분석가별로 나눠뒀습니다.
+
+```
+run.bat tune-history 005930                              # 기본 그리드로 백테스트, 결과만 출력
+run.bat tune-history 005930 --start 2025-01-01 --end 2025-09-01
+run.bat tune-history 005930 --apply                       # 1위 조합을 config/base.yaml에 바로 반영
+run.bat tune-history 005930 --top 10                       # 콘솔에 상위 몇 개까지 보여줄지
+```
+
+**어떻게 판단하나**: `(sma_short, sma_mid, sma_long)` 조합마다 "상승 정배열일
+때만 보유"하는 단순 롱온리 규칙으로 백테스트해서 수익률을 계산하고, 매수 후
+보유(벤치마크)보다 잘했으면 `SUCCESS`, 아니면(또는 거래가 아예 없었으면)
+`FAILURE`로 판정합니다. 모든 조합의 결과가 `tuning_runs` 테이블에 기록됩니다.
+
+**성공↔실패 전환 기록**: 같은 파라미터 조합을 나중에 다른 기간으로 다시
+튜닝했을 때 판정이 뒤집히면(예: 예전엔 SUCCESS였는데 이번엔 FAILURE)
+`tuning_transitions` 테이블에 별도로 기록합니다. 이건 "시장 국면이 바뀌어서
+예전에 통하던 설정이 더는 안 통한다"는 신호입니다. 그리드서치가 순위를 매길
+때도 이 뒤집힌 횟수(`flip_count`)만큼 감점(`score = 수익률 - flip_count × 2`)
+해서, 어쩌다 한 번 잘 맞았을 뿐인 불안정한 설정보다 꾸준히 통하는 설정을
+우선하도록 했습니다.
+
+**조정 방법**: `--apply` 옵션을 주면 1위(SUCCESS 중 점수가 가장 높은) 조합을
+`config/base.yaml`의 `analysts.history`에 자동으로 반영합니다(주석/서식은
+그대로 보존). 옵션 없이 실행하면 결과만 보여주고 config는 건드리지 않으니,
+먼저 결과를 보고 판단한 뒤 `--apply`로 확정하는 흐름을 권장합니다. 대시보드의
+"차트 및 분석" 페이지에도 "🧪 위원 튜닝 이력" 섹션에서 최근 성공/실패와
+전환 기록을 바로 볼 수 있습니다.
+
+**LLM 연결 대비**: 이 모든 기록(성공/실패, 전환)은 `MarketDataStore.
+tuning_llm_context(symbol, "history")`로 사람이 읽는 텍스트 한 덩어리로
+뽑을 수 있고, `main.py`는 이미 이 텍스트를 `llm_advisor.get_opinion()`의
+context에 같이 넘기고 있습니다. 지금은 `NoOpAdvisor`라 무시되지만, 나중에
+`llm/advisor.py`에 실제 LLM을 연결하면 "이 종목/이 설정은 과거에 이랬다"는
+걸 코드 변경 없이 바로 참고하게 됩니다.
+
 ## 키움증권 MCP (API 탐색 · 조회 보조 도구)
 
 `D:\dev\mcp\`에 별도로 관리 중인 Claude 데스크탑 확장 프로그램(.mcpb) 두 개입니다.
@@ -350,10 +493,21 @@ run.bat analyze-realtime 005930 10     # 10초 간격
 ## 앞으로 채워야 할 부분 (TODO)
 
 - 실현손익/승률 계산 로직 (체결 단가 기반)
-- 여러 종목 동시 운영 (지금은 CLI 인자로 종목 하나씩만 처리)
-- 자동 스케줄링 (Windows 작업 스케줄러로 `run.bat main`을 매일 실행)
-- `src/llm/advisor.py`의 `LocalGemmaAdvisor` — 이미 파인튜닝해둔 gemma-2-9b(GGUF) 연결
+- `collect-all`/`realtime`의 Windows 작업 스케줄러 자동 등록 (지금은 수동 등록 안내만 있음)
+- `agents/history_analyst.py`/`realtime_analyst.py`의 규칙기반 판단을 LLM(gemma-2-9b)으로 대체·보강
+- 신규 매매 전략 추가 (지금은 `ma_cross` 하나뿐 — `strategy.assignments` 구조는 준비됨)
+- 4-역할 위원회(`decision.enabled`)를 실제 계좌로 실행하기 전, 모의투자로 며칠 관찰해서
+  `buy_threshold`/`sell_threshold`/`weights`가 합리적인지 검증 필요 (아직 실거래로 검증 안 됨)
+- 위원회가 거부권(veto)만 행사하는 지금 구조를, 확신도가 높을 때 위원회가 직접 주문을
+  내는 구조로 확장할지 결정 (`agents/decision_maker.py`의 `decide()` 반환값은 이미 대비되어 있음)
+- `run.bat tune-history`는 아직 분석가-1(과거)만 튜닝합니다. 실시간 틱 데이터가
+  `realtime_ticks`에 충분히 쌓이면 분석가-2(현재)/분석가-3(비교)도 같은 방식(그리드서치
+  + `tuning_runs`/`tuning_transitions` 기록)으로 확장
+- `tuning_llm_context()`로 준비해둔 성공/실패 이력을, `llm/advisor.py`에 실제 LLM을
+  연결한 뒤 판단 성향 조정에 실제로 활용해보고 효과 검증
 - 코스피/코스닥 실시간 지수 연동 (현재 Mock)
+- `realtime/stream_collector.py`의 필드 매핑(`_PRICE_KEYS` 등)이 실제 `kiwoomcli --named` 출력과
+  맞는지 실사용 후 확인 (처음 실행 시 경고 로그로 원본 키 목록이 나오면 그걸 보고 조정)
 
 ## 주의
 

@@ -20,6 +20,7 @@ from ui_charts import kiwoom_candle_chart, kiwoom_orderbook_html
 from config_loader import load_config
 from data_layer.storage import MarketDataStore
 from close_day import _ticks_to_minute_bars  # 실시간 틱 -> 1분봉, close_day.py와 같은 로직 재사용
+from agents.decision_maker import DecisionMaker
 
 st.set_page_config(page_title="차트 및 분석", page_icon="📈", layout="wide")
 require_login()
@@ -208,6 +209,70 @@ def _render_realtime_section(symbol: str, ref_price: float | None):
 
 
 _render_realtime_section(selected, _reference_price(selected))
+
+st.markdown("---")
+
+# ---------------------------------------------------------------------------
+# 4-역할 위원회 (과거/현재/비교 분석가 + 매매 최종 결정권자)
+# ---------------------------------------------------------------------------
+st.subheader("🧭 매매 위원회 판단")
+st.caption(
+    "차트 분석가-1(과거) · 분석가-2(현재) · 분석가-3(과거-현재 비교)의 의견을 "
+    "최종 결정권자가 취합합니다. (규칙기반, `agents/decision_maker.py`)"
+)
+
+if st.button(f"{selected} 위원회 리포트 실행", key="run_committee"):
+    committee = DecisionMaker(store, config).decide(selected)
+    st.session_state["committee_result"] = committee
+
+committee = st.session_state.get("committee_result")
+if committee and committee["symbol"] == selected:
+    action_icon = {"BUY": "🟢 매수", "SELL": "🔴 매도", "HOLD": "🟡 관망"}.get(committee["action"], committee["action"])
+    m1, m2 = st.columns(2)
+    m1.metric("최종 결정", action_icon)
+    m2.metric("확신도", f"{committee['confidence']}%")
+
+    vote_cols = st.columns(3)
+    vote_labels = {"history": "분석가-1 (과거)", "realtime": "분석가-2 (현재)", "comparison": "분석가-3 (비교)"}
+    vote_icons = {"POSITIVE": "🟢 긍정", "NEGATIVE": "🔴 부정", "NEUTRAL": "⚪ 중립"}
+    for col, (key, label) in zip(vote_cols, vote_labels.items()):
+        stance = committee["votes"].get(key, "NEUTRAL")
+        col.metric(label, vote_icons.get(stance, stance))
+
+    with st.expander("판단 근거 자세히 보기"):
+        st.write(committee["reasoning"])
+        for key, label in vote_labels.items():
+            report = committee["reports"].get(key, {})
+            if report.get("summary"):
+                st.markdown(f"**{label}**: {report['summary']}")
+else:
+    st.caption("버튼을 누르면 현재 선택된 종목에 대해 위원회를 실행합니다 (일봉/실시간 데이터가 있어야 정확합니다).")
+
+st.markdown("---")
+
+# ---------------------------------------------------------------------------
+# 위원 파라미터 튜닝 이력 (백테스트 성공/실패 + 전환 기록)
+# ---------------------------------------------------------------------------
+st.subheader("🧪 위원 튜닝 이력 (분석가-1: 과거)")
+st.caption(
+    "`run.bat tune-history 종목코드`로 백테스트한 성공/실패 기록입니다. "
+    "같은 설정이 나중에 성공↔실패로 뒤집힌 경우는 따로 표시됩니다."
+)
+
+tuning_runs = store.recent_tuning_runs(selected, "history", limit=10)
+tuning_transitions = store.recent_tuning_transitions(selected, "history", limit=5)
+
+with st.expander(f"{selected} 튜닝 기록 보기", expanded=False):
+    if tuning_runs.empty:
+        st.caption("아직 튜닝 기록이 없습니다. `run.bat tune-history " + selected + "` 를 실행해보세요.")
+    else:
+        for _, row in tuning_runs.iterrows():
+            icon = "🟢" if row["outcome"] == "SUCCESS" else "🔴"
+            st.markdown(f"{icon} `{row['timestamp']}` {row['summary']}")
+    if not tuning_transitions.empty:
+        st.markdown("**⚠️ 성공/실패가 뒤집힌 설정**")
+        for _, row in tuning_transitions.iterrows():
+            st.markdown(f"- {row['summary']}")
 
 st.markdown("---")
 

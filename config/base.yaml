@@ -45,6 +45,45 @@ strategy:
 realtime:
   default_codes: []          # run.bat realtime 실행 시 인자를 안 주면 이 목록 사용
 
+# 4-역할 위원회: 차트 분석가-1(과거)/2(현재)/3(비교) + 매매 최종 결정권자(agents/decision_maker.py).
+# enabled=false(기본값)면 main.py는 지금까지처럼 strategy.generate_signal()만 그대로 씁니다.
+# enabled=true로 켜면, 위원회가 SELL 우세라고 판단할 때 BUY 신호를 보류하는 식으로
+# (반대도 동일) 규칙기반 전략 신호에 대한 안전장치로 작동합니다.
+decision:
+  enabled: false
+  buy_threshold: 0.4         # 가중 평균 점수(-1~1)가 이 값 이상이면 위원회 결론은 BUY
+  sell_threshold: -0.4       # 이 값 이하이면 SELL, 사이는 HOLD
+  weights:                   # 위원별 투표 가중치. 필요시 종목/전략별로 조정하세요.
+    history: 1.0             # 차트 분석가-1 (과거 추세)
+    realtime: 1.0            # 차트 분석가-2 (현재 모멘텀)
+    comparison: 1.5          # 차트 분석가-3 (과거-현재 비교, 정합성 판단이라 가중치를 조금 더 줌)
+
+# 각 위원(분석가)의 판단 기준. 여기 숫자를 바꾸는 게 "위원 교육"입니다 — 코드 수정 없이
+# 위원들의 판단 성향을 직접 조정합니다. 값을 생략하면 각 agents/*.py 파일에 있는
+# 기존 기본값이 그대로 쓰입니다(하위호환). 예시:
+#   - 분석가-1이 좀 더 긴 호흡으로 추세를 보게 하려면 sma_long을 120으로.
+#   - 분석가-2가 더 예민하게 반응하게 하려면 momentum_up_pct/momentum_down_pct를 0.3/-0.3으로.
+#   - 분석가-3의 박스권 돌파 판정을 더 보수적으로 하려면 box_breakout_high_pct를 95로.
+analysts:
+  history:                        # 차트 분석가-1 (과거)
+    sma_short: 5                  # 단기 이동평균 기간(일)
+    sma_mid: 20                   # 중기 이동평균 기간(일)
+    sma_long: 60                  # 장기 이동평균 기간(일)
+    volatility_window: 20         # 변동성(연율화) 계산에 쓰는 최근 일수
+    box_window: 60                # 박스권(고가/저가) 계산에 쓰는 최근 일수
+    volume_recent_days: 5         # 거래량 비교: 최근 N일 평균
+    volume_prior_days: 20         # 거래량 비교: 그 이전 N일 평균
+    min_bars_required: 20         # 분석에 필요한 최소 일봉 개수 (부족하면 ok=false)
+  realtime:                       # 차트 분석가-2 (현재)
+    lookback: 200                 # 분석에 사용할 최근 체결 틱 개수
+    momentum_up_pct: 0.5          # 이 값(%)보다 오르면 "단기 급등"
+    momentum_down_pct: -0.5       # 이 값(%)보다 내리면 "단기 급락"
+    volume_spike_window: 20       # 거래량 급증 판단에 쓰는 최근 틱 개수
+    volume_spike_alert_ratio: 2.0 # 평균 대비 이 배수 이상이면 요약문에 "거래량 몰림" 언급
+  comparison:                     # 차트 분석가-3 (비교)
+    box_breakout_high_pct: 90     # 박스권 상단 몇 % 이상을 "상단 돌파 시도"로 볼지
+    box_breakout_low_pct: 10      # 박스권 하단 몇 % 이하를 "하단 이탈"로 볼지
+
 risk:
   # 아래 세 값은 "최초 기본값"입니다. 대시보드(pages/3_리스크_설정.py)에서 바꾸면 DB의
   # settings 테이블에 저장되고, 그게 있으면 이 값보다 우선합니다 (live_trade.py가 매

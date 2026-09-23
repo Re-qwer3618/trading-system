@@ -11,6 +11,8 @@ REM        run.bat close-day [005930 000660 ...] [--date YYYY-MM-DD]
 REM        run.bat live-trade [005930 000660 ...] [--interval SEC]
 REM        run.bat analyze-history 005930
 REM        run.bat analyze-realtime 005930 [interval_sec]
+REM        run.bat analyze-decision 005930
+REM        run.bat tune-history 005930 [--apply] [--start YYYY-MM-DD] [--end YYYY-MM-DD]
 REM        run.bat inspect-chart 005930
 REM        run.bat inspect-account
 REM        run.bat inspect-universe
@@ -48,6 +50,10 @@ if "%1"=="backtest" (
     python src\analyze_history.py %2
 ) else if "%1"=="analyze-realtime" (
     python src\analyze_realtime.py %2 %3
+) else if "%1"=="analyze-decision" (
+    python src\analyze_decision.py %2
+) else if "%1"=="tune-history" (
+    python src\tune_analysts.py %2 %3 %4 %5 %6 %7 %8 %9
 ) else if "%1"=="inspect-chart" (
     python src\inspect_kiwoom_chart.py %2
 ) else if "%1"=="inspect-account" (
@@ -68,5 +74,5 @@ if "%1"=="backtest" (
     echo.
     streamlit run app.py
 ) else (
-    echo Usage: run.bat [backtest^|main^|collect^|collect-universe^|collect-all^|collect-index^|realtime^|close-day^|live-trade^|analyze-history^|analyze-realtime^|inspect-chart^|inspect-account^|inspect-universe^|dashboard^|app] args
+    echo Usage: run.bat [backtest^|main^|collect^|collect-universe^|collect-all^|collect-index^|realtime^|close-day^|live-trade^|analyze-history^|analyze-realtime^|analyze-decision^|tune-history^|inspect-chart^|inspect-account^|inspect-universe^|dashboard^|app] args
 )
