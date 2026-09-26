@@ -1,4 +1,5 @@
 .env
+.env.bak-*
 data/
 logs/
 __pycache__/

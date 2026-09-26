@@ -14,9 +14,9 @@ _MINUTE_METHOD_CANDIDATES, _TICK_METHOD_CANDIDATES)이 실제 kiwoom-client
 """
 
 import os
-from dotenv import load_dotenv
+from config_loader import load_env_files  # 프로젝트 .env + 중앙 .env
 
-load_dotenv()
+load_env_files()
 
 from kiwoom_client import KiwoomAPI, to_dataframe
 

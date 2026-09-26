@@ -4,8 +4,8 @@
 """
 
 import os
-from dotenv import load_dotenv
-load_dotenv()
+from config_loader import load_env_files  # 프로젝트 .env + 중앙 .env
+load_env_files()
 
 from kiwoom_client import KiwoomAPI, to_dataframe
 

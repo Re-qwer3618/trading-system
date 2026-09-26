@@ -8,10 +8,10 @@ kiwoom_provider.py가 정확한 컬럼명을 쓰고 있는지 확인하기 전�
 
 import sys
 from datetime import datetime
-from dotenv import load_dotenv
 import os
+from config_loader import load_env_files  # 프로젝트 .env + 중앙 .env
 
-load_dotenv()
+load_env_files()
 
 from kiwoom_client import KiwoomAPI, to_dataframe
 

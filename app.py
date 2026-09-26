@@ -5,7 +5,7 @@
     streamlit run app.py
 
 보안 참고:
-- DASHBOARD_PASSWORD(.env)와 정확히 일치해야 통과합니다.
+- DASHBOARD_PASSWORD(프로젝트 .env 또는 중앙 .env)와 정확히 일치해야 통과합니다.
 - .env에 DASHBOARD_PASSWORD가 없으면 대시보드 자체가 실행을 거부합니다
   (인증 없이 실수로 열어두는 걸 막기 위한 안전장치입니다).
 - 연속 실패 시 잠시 대기시간을 둬서 무차별 대입 시도를 늦춥니다.
@@ -22,9 +22,9 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent / "src"))
 
 import streamlit as st
-from dotenv import load_dotenv
+from config_loader import load_env_files  # 프로젝트 .env + 중앙(E:\\dev\\.env 등) .env
 
-load_dotenv(Path(__file__).resolve().parent / ".env")
+load_env_files()
 
 st.set_page_config(page_title="자동매매 시스템 대시보드", page_icon="📈", layout="centered")
 
