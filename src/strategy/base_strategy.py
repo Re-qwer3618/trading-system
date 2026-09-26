@@ -16,3 +16,8 @@ class BaseStrategy(ABC):
         반환값: "BUY" | "SELL" | "HOLD"
         """
         raise NotImplementedError
+
+    def prepare(self, symbol: str, df: pd.DataFrame) -> None:
+        """(선택) 백테스트가 전체 기간 데이터를 넘겨주는 사전 준비 훅. 지표를 한 번에 계산해 두는 전략이
+        오버라이드합니다. 실전(live_trade)에서는 호출되지 않으므로 generate_signal만으로도 동작해야 합니다."""
+        return None

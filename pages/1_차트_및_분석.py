@@ -19,6 +19,7 @@ from ui_common import require_login, render_header
 from ui_charts import kiwoom_candle_chart, kiwoom_orderbook_html
 from config_loader import load_config
 from data_layer.storage import MarketDataStore
+from core.factory import strategy_name_for
 from close_day import _ticks_to_minute_bars  # 실시간 틱 -> 1분봉, close_day.py와 같은 로직 재사용
 from agents.decision_maker import DecisionMaker
 
@@ -60,23 +61,23 @@ st.sidebar.markdown("---")
 # ---------------------------------------------------------------------------
 # 사이드바: 전략별 아코디언 그룹 (관심종목만)
 # ---------------------------------------------------------------------------
-# 지금은 실제 전략별 자동분류 로직이 없어서, 관심종목을 예시로 두 그룹에 나눠 보여줍니다.
-# TODO: 전략 엔진이 종목마다 태그를 남기면 여기서 실제 분류로 교체
-strategy_groups = {
-    "전략-1 (단타)": watchlist[: max(1, len(watchlist) // 2)] or ["005930"],
-    "전략-2 (스윙)": watchlist[max(1, len(watchlist) // 2):] or [],
-}
+# 그룹은 관심종목에 붙여둔 "전략 그룹" 태그 기준입니다 (🗄️ 데이터 수집 페이지 > 관심종목·전략에서
+# 지정). 태그가 비어있는 종목은 그 종목에 실제로 적용되는 전략 이름(config)으로 묶입니다.
+_names = {r.code: r.name for r in store.load_universe().itertuples()}
+strategy_groups: dict[str, list[str]] = {}
+for row in store.get_watchlist_detail().itertuples():
+    strategy_groups.setdefault(row.strategy or strategy_name_for(config, row.symbol), []).append(row.symbol)
+if not strategy_groups:  # 관심종목이 아직 비어있는 최초 상태 — 수집된 종목 일부만 보여줌
+    strategy_groups = {"수집 종목 (관심종목 없음)": watchlist[:30]}
 
 if "selected_symbol" not in st.session_state:
     st.session_state.selected_symbol = watchlist[0] if watchlist else "005930"
 
-for group_name, syms in strategy_groups.items():
-    with st.sidebar.expander(group_name, expanded=(group_name == "전략-1 (단타)")):
-        if not syms:
-            st.caption("종목 없음")
+for i, (group_name, syms) in enumerate(strategy_groups.items()):
+    with st.sidebar.expander(f"{group_name} ({len(syms)})", expanded=(i == 0)):
         for sym in syms:
             col_a, col_b = st.columns([3, 1])
-            if col_a.button(sym, key=f"sym_{sym}", use_container_width=True):
+            if col_a.button(f"{sym} {_names.get(sym, '')}".strip(), key=f"sym_{sym}", use_container_width=True):
                 st.session_state.selected_symbol = sym
             if col_b.button("✕", key=f"unwatch_{sym}", help="관심종목에서 제거"):
                 store.remove_from_watchlist(sym)
@@ -84,7 +85,7 @@ for group_name, syms in strategy_groups.items():
 
 st.sidebar.markdown("---")
 st.sidebar.caption(f"관심종목 {len(watchlist)}개 · 전체 수집 종목 {len(store.symbols())}개")
-st.sidebar.caption("종목 목록은 `run.bat collect 종목코드`로 수집한 종목만 실제 차트가 보입니다.")
+st.sidebar.caption("차트는 수집된 종목만 보입니다. 누락 종목은 🗄️ 데이터 수집 페이지에서 받을 수 있습니다.")
 
 selected = st.session_state.selected_symbol
 

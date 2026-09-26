@@ -115,6 +115,44 @@ def _resolve_namespace(api, candidates: list[str], what: str):
     )
 
 
+def _paginate_ex(fn, kwargs: dict, date_field: str, stop_before: str | None, max_pages: int,
+                 should_stop=None, on_page=None) -> tuple[list[dict], str]:
+    """_paginate와 같지만 "왜 멈췄는지"도 함께 돌려줍니다.
+
+    종료 사유:
+      "end"       서버가 더 이상 이어받을 페이지가 없다고 답함 (= 서버가 가진 가장 오래된 데이터까지 받음)
+      "stop"      stop_before 날짜 이하 데이터가 나온 페이지에 도달 (이미 저장된 구간/목표 과거일)
+      "max_pages" 페이지 상한에 걸려서 멈춤 (더 과거가 남아있을 수 있음)
+      "cancelled" should_stop()이 True를 돌려줘서 중간에 그만둠 (지금까지 받은 것만 반환)
+
+    should_stop/on_page: 대시보드에서 시작한 수집 작업이 긴 종목 하나(분봉 100페이지+ = 2분+)
+    도중에도 중지 요청을 받고 진행 신호(heartbeat)를 남기게 하는 훅입니다.
+    """
+    all_records: list[dict] = []
+    cont_yn, next_key = "N", ""
+    for _ in range(max_pages):
+        if should_stop is not None and should_stop():
+            return all_records, "cancelled"
+        resp = fn(cont_yn=cont_yn, next_key=next_key, **kwargs)
+        _, records = extract_records(resp)
+        if on_page is not None:
+            on_page()
+        if not records:
+            return all_records, "end"
+        all_records.extend(records)
+
+        if stop_before and any(str(r.get(date_field, ""))[:8] <= stop_before for r in records):
+            return all_records, "stop"
+
+        resp_cont = resp.get("cont-yn", "N")
+        resp_next = resp.get("next-key", "")
+        if resp_cont != "Y" or not resp_next:
+            return all_records, "end"
+        cont_yn, next_key = "Y", resp_next
+
+    return all_records, "max_pages"
+
+
 def _paginate(fn, kwargs: dict, date_field: str, stop_before: str | None, max_pages: int) -> list[dict]:
     """cont-yn/next-key 연속조회로 여러 페이지를 이어받아 레코드 리스트로 합칩니다.
 
@@ -125,25 +163,8 @@ def _paginate(fn, kwargs: dict, date_field: str, stop_before: str | None, max_pa
     페이지에서 멈춥니다 — 매일 도는 증분 수집이 매번 전체 과거를 다시 훑지 않도록
     하는 최적화입니다. 처음 수집하는 종목(stop_before=None)은 max_pages까지 최대한 받습니다.
     """
-    all_records: list[dict] = []
-    cont_yn, next_key = "N", ""
-    for _ in range(max_pages):
-        resp = fn(cont_yn=cont_yn, next_key=next_key, **kwargs)
-        _, records = extract_records(resp)
-        if not records:
-            break
-        all_records.extend(records)
-
-        if stop_before and any(str(r.get(date_field, ""))[:8] <= stop_before for r in records):
-            break
-
-        resp_cont = resp.get("cont-yn", "N")
-        resp_next = resp.get("next-key", "")
-        if resp_cont != "Y" or not resp_next:
-            break
-        cont_yn, next_key = "Y", resp_next
-
-    return all_records
+    records, _ = _paginate_ex(fn, kwargs, date_field, stop_before, max_pages)
+    return records
 
 
 class KiwoomRestProvider(BaseDataProvider):
@@ -158,6 +179,9 @@ class KiwoomRestProvider(BaseDataProvider):
         # 전 종목을 순회할 때 API 호출이 페이지 수만큼 곱해지므로 과하게 늘리지 마세요).
         self.max_pages_daily = int(history_cfg.get("max_pages_daily", 20))
         self.max_pages_intraday = int(history_cfg.get("max_pages_intraday", 3))
+        # 수집 작업(collect_worker.py)이 채워 넣는 훅. 긴 연속조회 도중 중지 요청 확인/진행 신호용.
+        self.should_stop = None
+        self.on_page = None
 
     def fetch_ohlcv(self, symbol: str, start_date: str | None = None) -> pd.DataFrame:
         """일봉 (ka10081). cont-yn/next-key로 연속조회하고 수정주가를 적용합니다.
@@ -186,17 +210,20 @@ class KiwoomRestProvider(BaseDataProvider):
         col = {key: _find_column(df, cands) for key, cands in _COLUMN_CANDIDATES.items()}
 
         out = pd.DataFrame({
-            "date": pd.to_datetime(df[col["date"]].astype(str), format="%Y%m%d").dt.strftime("%Y-%m-%d"),
-            "open": df[col["open"]].astype(float),
-            "high": df[col["high"]].astype(float),
-            "low": df[col["low"]].astype(float),
-            "close": df[col["close"]].astype(float),
+            "date": pd.to_datetime(df[col["date"]].astype(str), format="%Y%m%d", errors="coerce").dt.strftime("%Y-%m-%d"),
+            "open": pd.to_numeric(df[col["open"]], errors="coerce"),
+            "high": pd.to_numeric(df[col["high"]], errors="coerce"),
+            "low": pd.to_numeric(df[col["low"]], errors="coerce"),
+            "close": pd.to_numeric(df[col["close"]], errors="coerce"),
             "volume": _to_int_volume(df[col["volume"]]),
-        })
+        }).dropna(subset=["date", "close"])  # 날짜가 빈 레코드는 버림 (_fetch_intraday 주석 참고)
         out = out.sort_values("date")
 
         if start_date:
-            out = out[out["date"] > start_date]
+            # 마지막 저장일 당일 봉도 다시 받아 덮어씁니다(upsert라 안전). 장 마감 전에 저장된
+            # 미완성/근사 일봉(close_day.py의 틱 기반 근사치 포함)을 공식 확정값으로 교체하려면
+            # 당일 봉이 결과에 포함돼야 합니다.
+            out = out[out["date"] >= start_date]
 
         return out.reset_index(drop=True)
 
@@ -238,46 +265,66 @@ class KiwoomRestProvider(BaseDataProvider):
         return out.reset_index(drop=True)
 
     def _fetch_intraday(self, symbol: str, tic_scope: str, method_candidates: list[str],
-                         what: str, base_dt: str | None = None) -> pd.DataFrame:
+                         what: str, base_dt: str | None = None, max_pages: int | None = None,
+                         stop_before: str | None = None) -> pd.DataFrame:
         """분봉(ka10080)/틱(ka10079) 공용 로직. 응답 형태가 일봉과 거의 같고
         날짜 대신 체결시각(cntr_tm, YYYYMMDDHHmmss)을 씁니다.
 
-        max_pages_intraday까지 연속조회합니다 (일봉만큼 깊게 받지 않는 이유는
-        __init__의 주석 참고). start_date 기반 조기종료는 아직 안 함 — collect_all.py가
-        분봉/틱을 증분 없이 매번 새로 받는 기존 동작과 맞춥니다."""
+        기본은 max_pages_intraday까지만 연속조회합니다 (일봉만큼 깊게 받지 않는 이유는
+        __init__의 주석 참고). 분봉을 더 깊게 받으려면 max_pages를 크게 주고,
+        stop_before(YYYY-MM-DD 또는 YYYYMMDD)를 주면 그 날짜(또는 그보다 과거)를 담은 페이지에서
+        멈춥니다 — 증분 수집(이미 저장된 날짜에서 멈춤)과 과거 확장(목표 과거일에서 멈춤)에 같이 씁니다.
+
+        반환 DataFrame의 attrs["end_reason"]에 종료 사유가 들어갑니다("end"=서버 데이터의 끝까지 받음,
+        "stop", "max_pages", "cancelled" — _paginate_ex 참고)."""
         fn = _resolve_callable(self.api.chart, method_candidates, what)
         kwargs = {"stk_cd": symbol, "tic_scope": tic_scope, "upd_stkpc_tp": "1"}
         if base_dt is not None:
             kwargs["base_dt"] = base_dt
-        records = _paginate(
-            fn, kwargs, date_field="cntr_tm", stop_before=None, max_pages=self.max_pages_intraday
+        records, reason = _paginate_ex(
+            fn, kwargs, date_field="cntr_tm",
+            stop_before=stop_before.replace("-", "") if stop_before else None,
+            max_pages=max_pages or self.max_pages_intraday,
+            should_stop=self.should_stop, on_page=self.on_page,
         )
         df = to_dataframe(records)
 
         if df.empty:
-            return pd.DataFrame(columns=["timestamp", "open", "high", "low", "close", "volume"])
+            empty = pd.DataFrame(columns=["timestamp", "open", "high", "low", "close", "volume"])
+            empty.attrs["end_reason"] = reason
+            return empty
 
         ts_col = _find_column(df, _INTRADAY_TS_CANDIDATES)
         price_cols = {k: v for k, v in _COLUMN_CANDIDATES.items() if k != "date"}
         col = {key: _find_column(df, cands) for key, cands in price_cols.items()}
 
+        # 일부 종목(거래정지 등)은 시각이 빈 레코드 한 줄을 돌려줍니다 — 그대로 문자열화하면
+        # 'nan' 시각의 쓰레기 행이 저장되므로 시각을 못 읽은 행은 여기서 버립니다.
         out = pd.DataFrame({
-            "timestamp": pd.to_datetime(df[ts_col].astype(str), format="%Y%m%d%H%M%S").dt.strftime("%Y-%m-%d %H:%M:%S"),
-            "open": df[col["open"]].astype(float).abs(),
-            "high": df[col["high"]].astype(float).abs(),
-            "low": df[col["low"]].astype(float).abs(),
-            "close": df[col["close"]].astype(float).abs(),
+            "timestamp": pd.to_datetime(df[ts_col].astype(str), format="%Y%m%d%H%M%S", errors="coerce"),
+            "open": pd.to_numeric(df[col["open"]], errors="coerce").abs(),
+            "high": pd.to_numeric(df[col["high"]], errors="coerce").abs(),
+            "low": pd.to_numeric(df[col["low"]], errors="coerce").abs(),
+            "close": pd.to_numeric(df[col["close"]], errors="coerce").abs(),
             "volume": _to_int_volume(df[col["volume"]]),
-        })
-        return out.sort_values("timestamp").reset_index(drop=True)
+        }).dropna(subset=["timestamp", "close"])
+        out["timestamp"] = out["timestamp"].dt.strftime("%Y-%m-%d %H:%M:%S")
+        out = out.sort_values("timestamp").reset_index(drop=True)
+        out.attrs["end_reason"] = reason
+        return out
 
-    def fetch_minute(self, symbol: str, minute_scope: str = "5", base_dt: str | None = None) -> pd.DataFrame:
-        """분봉 (ka10080). minute_scope: 1/3/5/10/15/30/45/60(분)."""
-        return self._fetch_intraday(symbol, minute_scope, _MINUTE_METHOD_CANDIDATES, "fetch_minute", base_dt)
+    def fetch_minute(self, symbol: str, minute_scope: str = "5", base_dt: str | None = None,
+                      max_pages: int | None = None, stop_before: str | None = None) -> pd.DataFrame:
+        """분봉 (ka10080). minute_scope: 1/3/5/10/15/30/45/60(분).
+        max_pages/stop_before로 증분 수집이나 과거 확장을 합니다 (_fetch_intraday 참고)."""
+        return self._fetch_intraday(symbol, minute_scope, _MINUTE_METHOD_CANDIDATES, "fetch_minute",
+                                     base_dt, max_pages=max_pages, stop_before=stop_before)
 
-    def fetch_tick(self, symbol: str, tick_scope: str = "1") -> pd.DataFrame:
+    def fetch_tick(self, symbol: str, tick_scope: str = "1", max_pages: int | None = None,
+                    stop_before: str | None = None) -> pd.DataFrame:
         """틱차트 (ka10079). tick_scope: 1/3/5/10/30(틱)."""
-        return self._fetch_intraday(symbol, tick_scope, _TICK_METHOD_CANDIDATES, "fetch_tick")
+        return self._fetch_intraday(symbol, tick_scope, _TICK_METHOD_CANDIDATES, "fetch_tick",
+                                     max_pages=max_pages, stop_before=stop_before)
 
     def fetch_universe(self, market_codes: list[str] | None = None) -> pd.DataFrame:
         """전체 종목 리스트 (ka10099). market_codes 기본값: ["0","10"] (코스피/코스닥).

@@ -24,11 +24,18 @@ class BacktestEngine:
         fee_rate: float = 0.00015,
         tax_rate: float = 0.0018,
         slippage_rate: float = 0.001,
+        execution: str = "close",
+        start_date: str | None = None,
     ):
         """
         fee_rate: 매수/매도 각각에 붙는 위탁수수료율 (증권사·상품마다 다르므로 실제 값으로 맞추세요)
         tax_rate: 매도 시에만 붙는 증권거래세율 (현재 세율로 맞추세요)
         slippage_rate: 신호가 난 종가와 실제 체결가 사이의 가정 괴리율
+        execution: "close"(기본, 기존 동작) = 신호가 난 날 종가에 체결.
+                   "next_open" = 신호를 보고 다음 봉 시가에 체결 (종가를 보고 종가에 사는 비현실적 가정을
+                   없앤 방식이며 research/ 검증 화면과 같은 가정입니다). 손절은 두 방식 모두 봉 종가 기준.
+        start_date: 이 날짜 이후 구간만 백테스트 (지표 계산은 그 이전 데이터도 씁니다)
+        전략에 max_hold_days 속성이 있으면, 진입 후 그 거래일이 지났을 때 청산합니다.
         """
         self.data_store = data_store
         self.strategy = strategy
@@ -37,48 +44,85 @@ class BacktestEngine:
         self.fee_rate = fee_rate
         self.tax_rate = tax_rate
         self.slippage_rate = slippage_rate
+        if execution not in ("close", "next_open"):
+            raise ValueError("execution은 'close' 또는 'next_open'이어야 합니다.")
+        self.execution = execution
+        self.start_date = start_date
 
     def run(self, symbol: str, benchmark_code: str | None = None) -> dict:
         df = self.data_store.load(symbol)
         if df.empty:
             return {"symbol": symbol, "error": "저장된 데이터가 없습니다. 먼저 데이터를 수집하세요."}
 
+        self.strategy.prepare(symbol, df)  # 전체 기간 지표를 한 번에 계산해 두는 전략용 훅 (없으면 no-op)
+        max_hold = getattr(self.strategy, "max_hold_days", None)
+
         cash = self.starting_cash
         position = 0
         entry_price = 0.0
+        entry_i = 0
+        pending = None  # execution="next_open"에서 다음 봉 시가에 낼 주문: ("BUY"|"SELL", reason)
         trades = []
+
+        def buy(price: float, date: str, i: int, reason: str):
+            nonlocal cash, position, entry_price, entry_i
+            qty = self.risk_manager.calc_buy_quantity(cash, price)
+            if qty > 0:
+                cost = self._buy_cost(qty, price)
+                if cost <= cash:
+                    cash -= cost
+                    position, entry_price, entry_i = qty, price, i
+                    trades.append({"date": date, "side": "BUY", "price": price, "qty": qty, "reason": reason})
+
+        def sell(price: float, date: str, reason: str):
+            nonlocal cash, position, entry_price
+            cash += self._sell_proceeds(position, price)
+            trades.append({"date": date, "side": "SELL", "price": price, "qty": position, "reason": reason})
+            position, entry_price = 0, 0.0
 
         for i in range(len(df)):
             window = df.iloc[: i + 1]
-            price = float(window.iloc[-1]["close"])
-            date = window.iloc[-1]["date"]
+            bar = window.iloc[-1]
+            price, date = float(bar["close"]), bar["date"]
+
+            # 지난 봉에 낸 신호를 이번 봉 시가에 체결
+            if pending is not None:
+                side, reason = pending
+                pending = None
+                open_price = float(bar["open"])
+                if side == "BUY" and position == 0:
+                    buy(open_price, date, i, reason)
+                elif side == "SELL" and position > 0:
+                    sell(open_price, date, reason)
+
+            if self.start_date and date < self.start_date:
+                continue
 
             # 손절선 체크가 전략 신호보다 우선합니다 — 실전에서도 손절은
             # "전략이 SELL을 낼 때까지 기다리지 않고" 즉시 나가는 게 정상 동작입니다.
             if position > 0 and price <= self.risk_manager.stop_loss_price(entry_price):
-                cash += self._sell_proceeds(position, price)
-                trades.append({"date": date, "side": "SELL", "price": price, "qty": position, "reason": "STOP_LOSS"})
-                position = 0
-                entry_price = 0.0
+                sell(price, date, "STOP_LOSS")
                 continue
 
+            # 보유기간 만료는 그날 종가에 청산 (전략 신호와 무관). 검증 화면의 "t+1 시가 진입 -> t+h 종가
+            # 청산"과 맞추려고, next_open에서는 진입한 날을 1일째로 셉니다.
+            if position > 0 and max_hold:
+                hold_bars = i - entry_i + (1 if self.execution == "next_open" else 0)
+                if hold_bars >= max_hold:
+                    sell(price, date, "TIME")
+                    continue
+
             signal = self.strategy.generate_signal(symbol, window)
-
-            if signal == "BUY" and position == 0:
-                qty = self.risk_manager.calc_buy_quantity(cash, price)
-                if qty > 0:
-                    cost = self._buy_cost(qty, price)
-                    if cost <= cash:
-                        cash -= cost
-                        position = qty
-                        entry_price = price
-                        trades.append({"date": date, "side": "BUY", "price": price, "qty": qty, "reason": "SIGNAL"})
-
-            elif signal == "SELL" and position > 0:
-                cash += self._sell_proceeds(position, price)
-                trades.append({"date": date, "side": "SELL", "price": price, "qty": position, "reason": "SIGNAL"})
-                position = 0
-                entry_price = 0.0
+            if self.execution == "close":
+                if signal == "BUY" and position == 0:
+                    buy(price, date, i, "SIGNAL")
+                elif signal == "SELL" and position > 0:
+                    sell(price, date, "SIGNAL")
+            else:
+                if signal == "BUY" and position == 0:
+                    pending = ("BUY", "SIGNAL")
+                elif signal == "SELL" and position > 0:
+                    pending = ("SELL", "SIGNAL")
 
         last_price = float(df.iloc[-1]["close"])
         final_value = cash + position * last_price

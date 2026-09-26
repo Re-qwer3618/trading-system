@@ -48,6 +48,19 @@
   - `MarketDataStore.sync_universe()` 추가 — 기존 `upsert_universe`는 새로 안 들어온 종목을 안 지웠는데(계속 남아있음), 이건 이번 실행에 없는 코드를 삭제까지 해서 필터가 진짜로 반영되게 함
   - `config.data.intraday.minute_scope`를 `"5"` → `"1"`로 변경 (5분봉 대신 1분봉)
   - **버그 수정**: `kiwoom_rest_provider.py`의 분봉/틱 파싱이 거래량 `None`을 그대로 `.astype(int)`에 넣어 죽는 버그가 있었습니다 (전체 수집 중 100종목이 이걸로 실패, `_to_int_volume()` 헬퍼로 NaN을 0으로 채우도록 수정, 재수집으로 100/100 복구 확인)
+- ✅ **10단계 — 데이터 카탈로그 + 대시보드 수집 관리 + 실시간 이어쓰기 + 분봉 깊이 확장**:
+  - **데이터 카탈로그** (`data_layer/catalog.py`, `data_catalog` 테이블): 종목 x 데이터종류(일봉/1분봉/틱봉/실시간 체결·호가/기본정보)별로 시작·끝·건수·거래일 수를 미리 집계해 둡니다. 수천만 행 원본을 매번 세지 않고도 "어느 종목이 비었는지/얕은지"를 바로 압니다 (`run.bat catalog`, 전체 재집계 약 15초). 집계 중 예전 버전이 남긴 `'nan'` 쓰레기 행(일봉 3건, 분봉/틱 116건)을 발견해 삭제했고, 재발하지 않게 provider와 저장소 양쪽에서 걸러냅니다
+  - **새 대시보드 페이지 `pages/4_데이터_수집.py`**: ① 데이터 현황(종목별 커버 기간, 수집 필요 종목과 이유) ② 수집 실행(대상/데이터종류/분봉 깊이 선택 → 백그라운드 수집, 진행률·남은 시간·중지 버튼, 브라우저를 닫아도 계속 진행) ③ 관심종목·전략 관리 ④ 작업 이력(실패 종목만 재시도)
+  - **수집 엔진 통합** (`data_layer/collector.py`): 명령줄(`collect_all.py`)과 대시보드(`collect_worker.py`)가 같은 규칙을 씁니다. `run.bat collect-all --missing --minute --minute-days 60`처럼 카탈로그가 찾은 누락 종목만 받을 수도 있습니다
+  - **분봉 과거 확장**: 기존엔 분봉이 종목당 3페이지(2,700행)에서 잘려 유동성 낮은 종목은 8~20거래일치뿐이었습니다. 실측 결과 서버는 약 **1년 전(2025-09-01)까지** 113페이지(≈2분/종목)를 줍니다. `--minute-days N|max`(또는 대시보드 슬라이더)로 원하는 만큼 과거로 내려가고, 서버가 "더 없다"고 답한 종목은 표식(`exhausted`)을 남겨 다시 시도하지 않습니다. 틱봉은 900건이 1분 남짓이라 과거 확장이 의미 없어 제외했습니다
+  - **실시간 데이터 이어쓰기** (`close_day.py`): 실시간 틱을 `1m_rt`라는 별도 시리즈가 아니라 **공식 `1m` 분봉의 빈 구간에 이어붙입니다**(공식 값이 있는 분은 덮어쓰지 않음, 나중에 공식 분봉이 오면 교체). 인자 없이 실행하면 아직 안 합친 모든 날짜를 처리하고, 이미 합친 (날짜, 종목)은 건너뛰어 여러 번 실행해도 안전합니다 (`realtime_merge_log`). 근사 일봉은 정규장 틱만 쓰고 장이 끝나기 전에 수집기가 꺼진 날은 만들지 않습니다
+  - **관심종목 태그**: `watchlist`에 출처(직접/보유/전략후보)·전략 그룹·메모를 붙이고, 차트 페이지 사이드바가 이 전략 그룹으로 실제 분류합니다 (기존엔 관심종목을 반으로 나눈 가짜 그룹). 전략 신호 스캔으로 BUY 후보를 찾아 "전략 후보"로 추가할 수 있고, `live_trade.py`는 이제 관심종목 변경을 재시작 없이 반영합니다 (관심종목에서 뺀 종목도 보유 중이면 손절 감시는 유지)
+  - **버그 수정**: 일봉 증분 수집이 마지막 저장일 당일 봉을 버려서, 근사 일봉이 공식 값으로 교체되지 않던 문제(`>` → `>=`). DB를 WAL 모드로 전환하고 연결 대기를 60초로 늘려, 대시보드 조회·수집 워커·실시간 수집기가 동시에 쓸 때 "database is locked"로 틱이 유실되지 않게 했습니다
+- ✅ **11단계 — DB 파일 분리 + 매수 타이밍 전략 검증 도구**:
+  - **DB를 데이터 종류별 파일로 분리** (`data/db/`): `daily.db`(일봉·지수·종목리스트·기본정보) / `minute.db`(분봉) / `tick.db`(틱봉+실시간 체결) / `orderbook.db`(실시간 호가) / `trading.db`(매매판단·설정·관심종목·위원회/튜닝 기록) / `collection.db`(카탈로그·수집작업·병합기록). 분봉이 종목당 약 10만 행(전 종목 2.5억 행, 최종 약 20GB)이라 한 파일로는 실시간 수집기(tick/orderbook)·수집 워커(daily/minute)·라이브 매매(trading)가 서로 쓰기를 기다리게 되고, 호가만 따로 정리/백업하기도 어렵기 때문입니다. `run.bat migrate-db`로 1회 이관(원본은 `market_data.legacy.db`로 보관, 행 수 일치 검증 후 교체). 코드는 그대로 `MarketDataStore`를 쓰면 되고(연결마다 필요한 파일을 ATTACH), `data/db/daily.db`가 없으면 예전 단일 파일로 동작하는 호환 모드라 아직 이관하지 않은 컴퓨터도 그대로 돌아갑니다. `MarketDataStore(path, readonly=True)`는 모든 파일을 읽기 전용으로 열어 분석/검증 코드가 시장 데이터를 못 바꾸게 합니다
+  - **연결 누수 수정**: `with sqlite3.connect() as conn`은 커밋만 하고 닫지 않아 호출마다 새 연결을 여는 저장소 패턴에서 파일 핸들이 쌓였습니다(틱마다 쓰는 실시간 수집기에서 누수, 파일 이동/삭제도 막음). `with`가 끝나면 닫히는 연결로 교체
+  - **전략 검증 도구** (`src/research/`, 대시보드 `pages/5_전략_검증.py`, `run.bat research`): 종목·일자별 특징(거래량 5/20일·당일 급증·거래량 바닥, 이동평균 이격, RSI, 변동성, 박스 내 위치 ...) 계산 → "신호일 종가 확인 → 다음날 시가 진입 → N일 뒤 종가(손절·거래비용 반영)" 성과 → ① 이름 붙은 전략 후보 비교(거래량 축소/증가/급증, 눌림목, 현재 MA 교차 ...) ② 특징별 5분위 성과·IC·월별 일관성 ③ 좋은 매수 시점의 공통 특징(종목별 일관성 포함) ④ 규칙 탐색(앞 70%에서 찾고 뒤 30%로 검증) ⑤ 기본정보(PER/PBR/ROE)와의 연관성. 모든 성과는 같은 날 표본 평균을 뺀 초과수익이고 t값은 월 단위 군집으로 계산해 유의성 부풀림을 막습니다. 특징/결과 계산은 미래 참조가 없고(잘라 계산해도 같음) 진입·청산·손절 계산이 손계산과 일치함을 확인했습니다. 한계(생존편향, 기본정보 스냅샷, 일봉의 고저 순서 미상)는 화면과 `research/study.py` 상단에 적어두었습니다
+  - **검증한 규칙을 전략으로 반영**: `strategy/rule_strategy.py`의 `feature_rule` 전략(`entry/exit` 특징 조건 + `max_hold_days`)을 config에 붙여넣으면 main/live_trade가 같은 특징 계산으로 신호를 냅니다. 백테스트 엔진에 `execution="next_open"`(다음날 시가 체결, 검증과 같은 가정)·보유기간 청산·`start_date`를 추가했고 기본 동작(`close`)은 수정 전과 체결 내역까지 동일함을 3종목으로 확인했습니다. `live_trade.py`는 `max_hold_days` 전략을 장 마감 직전(15:15~)에 청산합니다
 - ✅ **4-역할 위원회 (매매 최종 결정권자)**: `agents/decision_maker.py`가 과거(`history_analyst`)/현재(`realtime_analyst`)/비교(`comparison_analyst`, 신규) 3명의 의견을 가중합해 BUY/SELL/HOLD + 확신도를 산출. `config.decision.enabled`로 `main.py` 매매 판단에 거부권(veto) 형태로 연결 가능 (기본 꺼짐, 기존 동작 불변)
 - ✅ **위원 판단 기준 config화**: 각 위원의 임계값(모멘텀%, 박스권%, 이동평균 기간 등)이 전부 `config/base.yaml`의 `analysts` 섹션으로 빠져서, 코드 수정 없이 조정 가능
 - ✅ **백테스트 기반 자동 튜닝 + 성공/실패 이력**: `run.bat tune-history`가 분석가-1(과거)의 이동평균 파라미터를 그리드서치해 `tuning_runs`/`tuning_transitions` 테이블에 성공/실패와 성공↔실패 전환을 기록하고, `--apply`로 1위 조합을 config에 바로 반영. 기록은 `MarketDataStore.tuning_llm_context()`로 LLM 연결 시 그대로 재사용 가능하도록 설계
@@ -66,6 +79,22 @@
   [kiwoom_rest, 기본]                                                    [kiwoom_rest, 기본]
   [dummy, 테스트용]                            (LLM 자문, 3단계부터 참여)  [paper, 배관 검증용]
 ```
+
+## 세 영역의 분리 (수집 / 매매 / 전략·검증)
+
+파일 위치를 옮기지 않고 **누가 무엇을 읽고 쓰는가**로 경계를 정했습니다 (프로세스도 서로 독립):
+
+| 영역 | 하는 일 | 주요 코드 | 쓰는 DB | 읽는 DB |
+|---|---|---|---|---|
+| **수집** | 과거/실시간 데이터 수집, 실시간 이어붙이기, 카탈로그 | `collect_*.py`, `collect_worker.py`, `data_layer/{collector,catalog,jobs}.py`, `realtime/stream_collector.py`, `close_day.py` | daily·minute·tick·orderbook·collection | — |
+| **매매** | 실시간 감시·주문, 리스크, 계좌/매매현황 | `live_trade.py`, `main.py`, `broker/`, `risk/`, `pages/2·3` | trading | 시장 데이터(읽기) |
+| **전략·검증** | 전략 정의, 백테스트, 특징/이벤트 검증, 위원회·튜닝 | `strategy/`, `backtest/`, `research/`, `research_strategy.py`, `agents/`, `tuning/`, `pages/5` | (trading의 기록만) | 시장 데이터(**읽기 전용**) |
+
+규칙: ① 시장 데이터(daily/minute/tick/orderbook)를 **쓰는 건 수집 영역뿐**입니다. 매매/검증은 읽기만 하고, 검증 도구는
+`MarketDataStore(readonly=True)`로 열어 실수로도 못 바꿉니다. ② 수집은 매매/전략 코드를 import하지 않습니다.
+③ 전략은 데이터 수집 방법을 모르고 `generate_signal(df)`만 구현하므로, 백테스트·검증·실전이 같은 전략/특징 코드를 씁니다.
+공용 접점은 `config_loader.py`와 `MarketDataStore`(저장소 계층) 둘뿐입니다. 폴더 자체를 `collection/`, `trading/`,
+`research/`로 나누는 것은 import 경로·서브프로세스 경로가 전부 바뀌고 실행 중인 수집 작업과 충돌해서 아직 하지 않았습니다.
 
 ## 폴더 구조
 ```
@@ -104,7 +133,13 @@ src/
   backtest/backtest_engine.py  실전과 동일한 전략/리스크 코드로 검증 (수수료·세금·슬리피지·손절 반영)
   collect_data.py           데이터 증분 수집 실행 (종목 지정, --full로 전체 재수집)
   collect_universe.py       전체 종목 리스트 수집 (ka10099, 코스피/코스닥)
-  collect_all.py            universe의 전체 종목 일봉(+분봉/틱) 일괄 갱신 — 장 마감 후 스케줄 실행용
+  collect_all.py            universe의 전체 종목 일봉(+분봉/틱/기본정보) 일괄 갱신 — 장 마감 후 스케줄 실행용 (--missing/--minute-days 등 지원)
+  collect_worker.py         대시보드가 만든 수집 작업(collection_jobs)을 백그라운드로 실행하는 워커
+  strategy_scan.py          저장된 일봉에 전략을 돌려 지금 BUY/SELL 신호인 종목 찾기 (관심종목 후보 발굴)
+  data_layer/
+    catalog.py              데이터 카탈로그 집계/조회 + 수집 필요 종목(find_gaps) — `run.bat catalog`
+    collector.py            종목 데이터 수집 엔진 (collect_all.py와 대시보드 워커가 공유)
+    jobs.py                 수집 작업 등록/워커 실행/중지
   collect_index.py          시장 벤치마크(코스피/코스닥) 지수 일봉 수집 — 백테스트 알파 계산용
   analyze_history.py        과거 차트 분석 에이전트 CLI (agents/history_analyst.py)
   analyze_realtime.py       실시간 분석 에이전트 감시 CLI (agents/realtime_analyst.py)
@@ -193,7 +228,9 @@ git에 포함되지 않습니다 — 컴퓨터별로 한 번씩 아래처럼 만
 Git으로 옮겨가는 건 **코드뿐**입니다. 아래는 컴퓨터마다 별도로 해야 합니다.
 
 - `.env` 새로 작성 (API 키, 경로, `ENV_NAME`, `DASHBOARD_PASSWORD`)
-- `data/market_data.db` 재수집 (`run.bat collect`) — DB 파일 자체를 git에 올리지 않음
+- `data/db/*.db`(또는 이관 전이라면 `data/market_data.db`) 재수집 (`run.bat collect`) — DB 파일 자체를 git에 올리지 않음.
+  컴퓨터 사이에 옮길 땐 파일 단위라 편합니다: 가벼운 `daily.db`/`trading.db`/`collection.db`만 복사하고 수십 GB인 `minute.db`는
+  각 컴퓨터에서 받거나, 필요할 때만 복사하세요 (복사 전에 그 컴퓨터의 수집/실시간 프로세스를 멈추세요)
 - `pip install -r requirements.txt` — 코드는 와도 패키지 설치는 별개
 - conda 가상환경 활성화 (또는 위의 `start_dashboard.bat` 더블클릭 방식)
 - `start_dashboard.bat` — 컴퓨터별 가상환경 경로가 달라 git에 포함하지 않음, 위 방법대로 새로 생성
@@ -224,11 +261,23 @@ Git으로 옮겨가는 건 **코드뿐**입니다. 아래는 컴퓨터마다 별
 ```
 run.bat collect-universe          # 코스피/코스닥 전체 종목 리스트 → universe 테이블
 run.bat collect-all                # universe 전체 종목의 일봉을 증분 수집
-run.bat collect-all --minute       # + 분봉(기본 5분, config.data.intraday.minute_scope)
+run.bat collect-all --minute       # + 분봉(config.data.intraday.minute_scope, 지금 기본 1분) — 증분
 run.bat collect-all --tick         # + 틱
 run.bat collect-all --info         # + 기본정보(PER/PBR/시가총액 등)
 run.bat collect-all --limit 50     # 테스트용으로 앞 50종목만
+
+# 분봉을 더 과거까지 (기본 수집은 종목당 최근 약 2~3주에서 끝남)
+run.bat collect-all --minute --minute-days 60      # 오늘-60일까지
+run.bat collect-all --minute --minute-days max     # 서버가 가진 가장 오래된 분봉(약 1년)까지
+run.bat collect-all --missing --minute --minute-days 60   # 카탈로그가 "받아야 함"이라 본 종목만
+run.bat collect-all --watchlist --minute --minute-days max # 관심종목만
+run.bat catalog                    # 데이터 카탈로그 전체 재집계 + 요약
 ```
+
+명령줄 대신 **대시보드의 "🗄️ 데이터 수집" 페이지**에서 같은 작업을 버튼으로 시작할 수 있습니다
+(누락 종목 자동 선정, 진행률/남은 시간, 중지, 실패 종목 재시도). 수집은 종목을 "관심종목 → 시가총액 큰 순"으로
+처리하므로 중간에 멈춰도 중요한 종목부터 끝나 있고, 다시 실행하면 이어서 진행됩니다.
+분봉 `max`는 종목당 최대 약 2분(유동성 큰 종목, 페이지당 약 1초)이라 전 종목이면 하루~이틀 걸립니다.
 
 **전체 종목을 일봉+분봉+틱+기본정보 다 받으면 종목당 API 호출이 여러 번씩 쌓여서
 전체(수천 종목) 기준 몇 시간이 걸릴 수 있습니다** — 장 마감 후 스케줄러로 밤새
@@ -278,23 +327,30 @@ run.bat realtime 005930 --real          # 모의 대신 실전 데이터 구독
 채웁니다. 아직은 수동 실행이며, 자동 스케줄링(작업 스케줄러로 장 시작 시 자동 기동)은
 TODO입니다.
 
-### 2-1) 장마감 후 기존 데이터에 합치기
+### 2-1) 실시간 데이터를 기존 종목별 데이터에 이어쓰기
 
-`realtime_ticks`는 종목/구간 구분 없이 계속 쌓이기만 하는 원시 로그입니다. 장이
-끝나면 `close_day.py`가 그날 종목별로 모아 1분봉을 만들고, 기존 종목별 저장소에
-합칩니다:
+`realtime_ticks`는 종목/구간 구분 없이 계속 쌓이기만 하는 원시 로그입니다.
+`close_day.py`가 이걸 종목별 1분봉으로 만들어 **공식 분봉(`1m`)의 빈 구간에 이어붙입니다**
+(대시보드 "데이터 수집 > 실시간 데이터 이어붙이기"의 [지금 병합] 버튼도 같은 동작):
 
 ```
-run.bat close-day                          # 오늘, 실시간 틱이 있던 전 종목
+run.bat close-day                          # 아직 안 합친 모든 날짜, 실시간 틱이 있던 전 종목
 run.bat close-day 005930 000660            # 특정 종목만
-run.bat close-day --date 2026-09-22        # 다른 날짜 지정 (그날 못 돌렸을 때)
+run.bat close-day --date 2026-09-22        # 특정 날짜만 (그날 못 돌렸을 때)
+run.bat close-day --force                  # 이미 합친 것도 다시 계산
 ```
 
-- 1분봉은 `intraday_ohlcv`에 `interval="1m_rt"`로 합쳐집니다 (`collect_all.py --minute`이
-  쓰는 `"5m"` 등 API 기반 분봉과 같은 테이블에 나란히 쌓이되, interval로 구분되어 섞이지 않습니다).
-- 그날 `ohlcv`에 공식 일봉이 아직 없는 종목만 실시간 틱으로 만든 근사 일봉을 채워 넣습니다.
-  이미 공식 일봉이 있으면 건드리지 않습니다 — 나중에 `collect_data.py`를 돌리면 그 근사치가
-  공식 값으로 자연스럽게 덮어써집니다.
+- 분봉은 공식 분봉과 **같은 시리즈(`interval="1m"`)** 에 들어가서 차트/전략이 한 줄로 읽습니다.
+  공식 분봉이 이미 있는 분은 절대 덮어쓰지 않고, 없는 분만 채웁니다. 나중에 `collect_all.py --minute`로
+  공식 분봉을 받으면 같은 분이 공식 값으로 교체됩니다.
+- 장중(20시 전)에 돌리면 아직 진행 중인 마지막 1분은 제외합니다. 이미 합친 (날짜, 종목)은 틱 수가
+  그대로면 건너뛰므로(`realtime_merge_log`) 몇 번을 실행해도 안전합니다.
+- 그날 `ohlcv`에 공식 일봉이 아직 없는 종목만 **정규장(09:00~15:30) 틱**으로 근사 일봉을 채웁니다
+  (장 마감 15:40 이후/과거 날짜만, 수집기가 15:20 전에 꺼진 날은 반쪽짜리 일봉을 만들지 않음).
+  `collect_all.py`로 공식 일봉을 받으면 당일 봉이 공식 값으로 교체됩니다.
+- 호가(`realtime_orderbook`)는 캔들로 뭉개면 의미가 없어서 원본 스냅샷 그대로 종목별로 시간순 누적됩니다.
+  건수/기간은 데이터 카탈로그에서 확인하세요. (하루 수십만 건, 수백 MB씩 늘어나므로 오래된 호가는
+  주기적으로 정리하는 방안을 검토하세요.)
 - 장 마감 후(예: 매일 15:40) Windows 작업 스케줄러에 등록해서 자동 실행할 수 있습니다
   (`collect-all` 등록 방법과 동일하게 인수만 `close-day`로 바꾸면 됩니다).
 

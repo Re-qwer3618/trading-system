@@ -11,6 +11,7 @@ from broker.paper_broker import PaperBroker
 from broker.kiwoom_rest_broker import KiwoomRestBroker
 from broker.kiwoom_mcp_broker import KiwoomMCPBroker
 from strategy.ma_cross_strategy import MACrossStrategy
+from strategy.rule_strategy import FeatureRuleStrategy
 from llm.advisor import NoOpAdvisor, LocalGemmaAdvisor
 
 
@@ -39,6 +40,7 @@ def build_broker(config: dict, data_store):
 
 _STRATEGY_REGISTRY = {
     "ma_cross": MACrossStrategy,
+    "feature_rule": FeatureRuleStrategy,  # 전략 검증 화면에서 찾은 특징 조건 규칙 (strategy/rule_strategy.py)
 }
 
 
@@ -65,6 +67,14 @@ def build_strategy(config: dict, symbol: str | None = None):
     if cls is None:
         raise ValueError(f"알 수 없는 strategy: {name} (등록된 전략: {list(_STRATEGY_REGISTRY.keys())})")
     return cls(**params)
+
+
+def strategy_name_for(config: dict, symbol: str) -> str:
+    """이 종목에 실제로 적용되는 전략 이름 (assignments 우선, 없으면 기본 전략).
+    대시보드가 전략 그룹 태그가 비어있는 종목을 자동 분류하는 데 씁니다."""
+    assignments = config.get("strategy", {}).get("assignments", {}) or {}
+    spec = assignments.get(symbol)
+    return spec["name"] if spec else config["strategy"]["name"]
 
 
 def build_llm_advisor(config: dict):

@@ -56,6 +56,7 @@ import logging
 from datetime import datetime
 from zoneinfo import ZoneInfo
 
+import numpy as np
 import pandas as pd
 
 from config_loader import load_config
@@ -67,6 +68,7 @@ logging.basicConfig(level="INFO", format="%(asctime)s [%(levelname)s] %(message)
 log = logging.getLogger(__name__)
 
 _KST = ZoneInfo("Asia/Seoul")
+_entry_dates: dict[str, str] = {}  # 종목 -> 진입일(YYYY-MM-DD). 전략의 max_hold_days 청산용 (프로세스 메모리)
 _MARKET_OPEN_MIN = 9 * 60         # 09:00
 _MARKET_CLOSE_MIN = 15 * 60 + 30  # 15:30
 
@@ -130,6 +132,7 @@ def _check_symbol(symbol: str, store, broker, risk: RiskManager, llm_advisor, co
                        f"손절선 {stop_price:,.0f}원): {result}")
             if success:
                 entry_prices.pop(symbol, None)
+                _entry_dates.pop(symbol, None)
                 last_signal[symbol] = "SELL"  # 이번 턴에 이미 팔았으니 전략 SELL 신호로 또 팔지 않도록
             opinion = llm_advisor.get_opinion(symbol, context=f"{symbol} 손절 발동 (현재가 {live_price:,.0f}원)")
             store.log_decision(symbol, "STOP_LOSS", opinion["stance"], action, detail)
@@ -138,6 +141,27 @@ def _check_symbol(symbol: str, store, broker, risk: RiskManager, llm_advisor, co
 
     live_df = _with_live_bar(df, datetime.now(_KST).strftime("%Y-%m-%d"), live_price)
     strategy = build_strategy(config, symbol)
+
+    # 보유기간 청산: 전략에 max_hold_days가 있으면(feature_rule 등), 진입일을 1일째로 세어 그 일수째 되는 날
+    # 장 마감 직전(15:15~)에 청산합니다 — 검증 화면의 "t+1 시가 진입 -> t+h 종가 청산"과 같은 규칙.
+    # 진입일은 이 프로세스가 기억하므로 재시작하면 재시작한 날부터 다시 셉니다 (entry_prices와 같은 한계).
+    max_hold = getattr(strategy, "max_hold_days", None)
+    now_kst = datetime.now(_KST)
+    if position > 0 and max_hold and symbol in _entry_dates and now_kst.hour * 60 + now_kst.minute >= 15 * 60 + 15:
+        held_days = int(np.busday_count(_entry_dates[symbol], now_kst.strftime("%Y-%m-%d"))) + 1
+        if held_days >= max_hold:
+            result = broker.place_order(symbol, "SELL", position)
+            success = result.get("status") in ("SUBMITTED", "FILLED")
+            action = "SELL" if success else "SELL_FAILED"
+            detail = f"보유기간 청산 ({held_days}일째 >= {max_hold}일): {result}"
+            if success:
+                entry_prices.pop(symbol, None)
+                _entry_dates.pop(symbol, None)
+                last_signal[symbol] = "SELL"
+            store.log_decision(symbol, "TIME_EXIT", "NEUTRAL", action, detail)
+            log.info(f"[{symbol}] 보유기간 청산 액션={action} {detail}")
+            return
+
     signal = strategy.generate_signal(symbol, live_df)
 
     changed = last_signal.get(symbol) != signal
@@ -164,6 +188,7 @@ def _check_symbol(symbol: str, store, broker, risk: RiskManager, llm_advisor, co
                     detail = str(result)
                     if success:
                         entry_prices[symbol] = live_price
+                        _entry_dates[symbol] = now_kst.strftime("%Y-%m-%d")
                 else:
                     detail = "매수 수량 0 (현금 부족 또는 비중 한도)"
         elif signal == "SELL" and position > 0:
@@ -173,6 +198,7 @@ def _check_symbol(symbol: str, store, broker, risk: RiskManager, llm_advisor, co
             detail = str(result)
             if success:
                 entry_prices.pop(symbol, None)
+                _entry_dates.pop(symbol, None)
 
     # 매 interval마다 전 종목을 다 로그로 남기면 decisions 테이블이 금방 커지므로,
     # 실제 주문을 시도했거나 신호가 바뀐 경우에만 기록합니다.
@@ -207,7 +233,10 @@ def run(symbols: list[str] | None, interval: int = 60):
     # 최초 실행이라 watchlist가 비어있으면, 지금까지 수집된 종목으로 시드합니다
     # (이후로는 대시보드에서 관리 — collect_all.py로 전체 종목을 더 받아도 안 늘어남).
     store.seed_watchlist_if_empty(store.symbols())
-    symbols = symbols or store.get_watchlist()
+    # 종목을 인자로 직접 준 경우엔 그 목록으로 고정하고, 아니면 매 확인 주기마다 관심종목을
+    # 다시 읽습니다 (대시보드에서 종목을 추가/제거하면 재시작 없이 반영).
+    fixed_symbols = list(symbols) if symbols else None
+    symbols = fixed_symbols or store.get_watchlist()
     if not symbols:
         log.error("관심종목이 비어 있습니다. collect_data.py로 종목을 먼저 수집하거나 "
                    "대시보드에서 관심종목을 추가하세요.")
@@ -216,20 +245,25 @@ def run(symbols: list[str] | None, interval: int = 60):
     log.info(f"실행 환경: {config['_meta']['detected_env']} / 매매모드: {config['broker']['provider']} "
              f"(is_mock={config.get('kiwoom', {}).get('is_mock', True)})")
 
-    # 이미 보유 중인 종목은 진짜 매수가를 모르므로(프로세스 재시작 시 메모리가 비워짐),
-    # 지금 이 순간의 가격을 잠정 진입가로 써서 최소한 "지금부터"는 손절이 걸리게 합니다.
     last_signal: dict[str, str] = {}
     entry_prices: dict[str, float] = {}
-    for symbol in symbols:
+
+    def _backfill_entry(symbol: str):
+        # 이미 보유 중인 종목은 진짜 매수가를 모르므로(프로세스 재시작 시 메모리가 비워짐),
+        # 지금 이 순간의 가격을 잠정 진입가로 써서 최소한 "지금부터"는 손절이 걸리게 합니다.
         try:
             if broker.get_position(symbol) > 0:
                 price = _latest_price(store, symbol)
                 if price is not None:
                     entry_prices[symbol] = price
+                    _entry_dates[symbol] = datetime.now(_KST).strftime("%Y-%m-%d")
                     log.warning(f"[{symbol}] 이미 보유 중인 포지션을 발견했습니다. 원래 매수가를 몰라 "
                                 f"현재가({price:,.0f}원)를 잠정 진입가로 잡고 손절을 겁니다.")
         except Exception as exc:
             log.warning(f"[{symbol}] 보유 여부 확인 중 오류: {exc}")
+
+    for symbol in symbols:
+        _backfill_entry(symbol)
 
     log.info(f"라이브 매매 감시 시작: {len(symbols)}종목, {interval}초 간격 (Ctrl+C로 종료)")
 
@@ -253,6 +287,18 @@ def run(symbols: list[str] | None, interval: int = 60):
             risk = RiskManager(risk_settings["max_position_pct"], risk_settings["risk_limit_pct"],
                                 starting_cash=starting_cash)
             max_concurrent_positions = risk_settings["max_concurrent_positions"]
+
+            if fixed_symbols is None:
+                current = store.get_watchlist()
+                # 관심종목에서 뺐더라도 보유 중인(=손절 감시 중인) 종목은 청산될 때까지 계속 봅니다.
+                monitored = current + [s for s in entry_prices if s not in current]
+                if monitored != symbols:
+                    added = [s for s in monitored if s not in symbols]
+                    removed = [s for s in symbols if s not in monitored]
+                    for s in added:
+                        _backfill_entry(s)
+                    log.info(f"관심종목 변경 반영: {len(monitored)}종목 (추가 {added}, 제외 {removed})")
+                    symbols = monitored
 
             for symbol in symbols:
                 try:
