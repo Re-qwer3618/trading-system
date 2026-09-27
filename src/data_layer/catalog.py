@@ -18,6 +18,8 @@ find_gaps()는 카탈로그를 보고 "받아야 할 종목"(누락/오래됨/�
 
 실행:
     python src/data_layer/catalog.py            # 전체 재집계 + 요약 출력
+    python src/data_layer/catalog.py --purge-orphans          # 잔재 종목 목록만 보기 (지우지 않음)
+    python src/data_layer/catalog.py --purge-orphans --apply  # 실제로 지움
 """
 
 import sys
@@ -161,6 +163,12 @@ def catalog_matrix(store: MarketDataStore) -> pd.DataFrame:
     out["watch"] = out["symbol"].isin(watch)
     for col in ("m1_exhausted", "d_exhausted"):
         out[col] = out[col].fillna(0).astype(int).astype(bool)
+
+    # universe에서 빠진(더 이상 수집 대상이 아닌 ETF/ETN/우선주/스팩, 또는 보유 중이라 관심종목에만
+    # 남은 종목) 것들은 universe 이름이 없습니다 — 기본정보에 이름이 있으면 그걸로 채웁니다.
+    missing = out["name"].isna()
+    if missing.any():
+        out.loc[missing, "name"] = out.loc[missing, "symbol"].map(store.basic_info_names())
     return out
 
 
@@ -242,10 +250,71 @@ def summarize(store: MarketDataStore) -> dict:
     }
 
 
+# ----------------------------------------------------------------------
+# 잔재 정리 — universe/관심종목에서 완전히 빠진 종목의 데이터
+# ----------------------------------------------------------------------
+
+def find_orphan_symbols(store: MarketDataStore) -> list[str]:
+    """지금은 어디에도 속하지 않는(universe에도 관심종목에도 없는) 채로 조금이라도 데이터가 남은
+    종목을 찾습니다. 전형적인 경로: 예전(ETF/ETN/우선주/스팩 제외 규칙이 생기기 전)에 관심종목이었다가
+    실시간 체결을 몇 틱 받은 뒤 제외돼, 그 몇 틱으로 만든 분봉 몇 개만 고아로 남은 경우 —
+    일봉/기본정보 없이 종목명도 안 붙는 채로 카탈로그에 계속 나타납니다.
+
+    안전장치: 일봉(ohlcv)이나 기본정보(stock_basic_info)가 하나라도 있으면 절대 포함하지 않습니다
+    (실제로 수집했던 적이 있는 종목의 역사는 지금 universe/관심종목에 없어도 남겨둡니다)."""
+    universe = set(store.universe_codes())
+    watch = set(store.get_watchlist())
+    cat = store.load_catalog()
+    with store._connect("daily") as conn:
+        has_daily = {r[0] for r in conn.execute("SELECT DISTINCT symbol FROM ohlcv").fetchall()}
+        has_info = {r[0] for r in conn.execute("SELECT symbol FROM stock_basic_info").fetchall()}
+    candidates = set(cat["symbol"]) - universe - watch - has_daily - has_info
+    return sorted(candidates)
+
+
+def purge_orphan_symbols(store: MarketDataStore, symbols: list[str]) -> dict:
+    """find_orphan_symbols()가 찾은 종목의 데이터를 전부 지웁니다(분봉/틱봉/실시간 체결·호가/병합기록/
+    카탈로그). find_orphan_symbols와 같은 안전장치(일봉·기본정보 없는 것만) 없이 넘겨받은 목록을
+    그대로 지우니, 이 함수를 직접 호출할 땐 반드시 find_orphan_symbols의 결과만 넘기세요."""
+    if not symbols:
+        return {"symbols": 0}
+    removed = {"intraday_ohlcv": 0, "realtime_ticks": 0, "realtime_orderbook": 0,
+              "realtime_merge_log": 0, "data_catalog": 0}
+    with store._connect() as conn:
+        for i in range(0, len(symbols), 500):
+            chunk = symbols[i:i + 500]
+            q = ",".join("?" * len(chunk))
+            for ref in store.intraday_refs():
+                removed["intraday_ohlcv"] += conn.execute(
+                    f"DELETE FROM {ref} WHERE symbol IN ({q})", chunk).rowcount
+            removed["realtime_ticks"] += conn.execute(
+                f"DELETE FROM realtime_ticks WHERE symbol IN ({q})", chunk).rowcount
+            removed["realtime_orderbook"] += conn.execute(
+                f"DELETE FROM realtime_orderbook WHERE symbol IN ({q})", chunk).rowcount
+            removed["realtime_merge_log"] += conn.execute(
+                f"DELETE FROM realtime_merge_log WHERE symbol IN ({q})", chunk).rowcount
+            removed["data_catalog"] += conn.execute(
+                f"DELETE FROM data_catalog WHERE symbol IN ({q})", chunk).rowcount
+    removed["symbols"] = len(symbols)
+    return removed
+
+
 if __name__ == "__main__":
+    import sys
     from config_loader import load_config
 
     _store = MarketDataStore(load_config()["data"]["db_path"])
+
+    if "--purge-orphans" in sys.argv:
+        _orphans = find_orphan_symbols(_store)
+        print(f"잔재 종목 {len(_orphans)}개: {_orphans}")
+        if "--apply" in sys.argv:
+            print(purge_orphan_symbols(_store, _orphans))
+            print(refresh_catalog(_store))
+        else:
+            print("미리보기입니다. 실제로 지우려면 --apply 를 붙이세요.")
+        raise SystemExit(0)
+
     print("카탈로그 재집계 중... (수십 초 걸립니다)")
     print(refresh_catalog(_store))
     print(summarize(_store))

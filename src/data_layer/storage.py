@@ -822,6 +822,13 @@ class MarketDataStore:
                 (*values, datetime.now().isoformat(timespec="seconds")),
             )
 
+    def basic_info_names(self) -> dict[str, str]:
+        """전 종목 이름 사전 (symbol -> name). universe에는 없지만(보유 중이라 관심종목에만 남은
+        ETF 등) 기본정보는 있는 종목의 이름을 채우는 데 씁니다 (catalog.catalog_matrix 참고)."""
+        with self._connect("daily") as conn:
+            rows = conn.execute("SELECT symbol, name FROM stock_basic_info WHERE name IS NOT NULL").fetchall()
+        return dict(rows)
+
     def get_basic_info(self, symbol: str) -> dict | None:
         with self._connect() as conn:
             row = conn.execute(

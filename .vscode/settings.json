@@ -1,0 +1,8 @@
+﻿{
+  // 이 프로젝트의 파이썬 기준: conda agent-py313 (3.13). 사용자 전역 설정(miniconda base 3.14)보다 우선합니다.
+  // 상위 폴더 기준 상대경로라 집(E:)/회사(D:) 어디서든 동일하게 동작합니다.
+  // uv로 전환하면 이 줄을 "${workspaceFolder}/.venv/Scripts/python.exe"로 바꾸세요.
+  "python.defaultInterpreterPath": "${workspaceFolder}/../../envs/miniconda3/envs/agent-py313/python.exe",
+  "python.terminal.activateEnvironment": false,
+  "files.encoding": "utf8"
+}

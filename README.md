@@ -80,6 +80,21 @@
   [dummy, 테스트용]                            (LLM 자문, 3단계부터 참여)  [paper, 배관 검증용]
 ```
 
+## 파이썬 실행 환경 기준
+
+- **프로젝트 표준: conda `agent-py313` (Python 3.13)** — 위치는 `E:\dev\envs\miniconda3\envs\agent-py313` (회사는 `D:\dev\...`).
+  miniconda의 base는 3.14지만 프로젝트에서는 쓰지 않습니다.
+- **`run.bat`이 인터프리터를 직접 찾습니다** (PATH의 `python`에 의존하지 않음): ① `TRADING_PYTHON` 환경변수 → ② 프로젝트 `.venv`(uv 전환 후)
+  → ③ 상위 폴더 기준 `..\..\envs\miniconda3\envs\agent-py313`. 못 찾으면 안내 후 종료합니다. `start_dashboard.bat`도 이를 그대로 씁니다.
+- **VS Code**: `.vscode/settings.json`이 같은 환경을 인터프리터로 지정합니다(사용자 전역 설정의 miniconda base보다 우선).
+- **PATH의 `python`은 쓸 수 없는 Windows 스토어 스텁**이라 직접 호출하면 실패합니다(`Python` 한 줄만 출력, 종료코드 9009/49).
+  스크립트를 직접 실행할 때는 `E:\dev\envs\miniconda3\envs\agent-py313\python.exe`를 쓰거나 `run.bat`을 쓰세요.
+  스텁은 Windows 설정 > 앱 > 고급 앱 설정 > **앱 실행 별칭**에서 `python.exe`/`python3.exe`를 끄면 사라집니다.
+- 이 PC의 파이썬 잔재 정리 이력: 빈 `Programs\Python\Python313` 폴더, 사용자 레지스트리 `PythonCore\3.10`, 사용자 PATH의 `Python310` 항목을 정리했고
+  (백업: `E:\dev\_setup\backup\python-cleanup-*`), 관리자 권한이 필요한 `HKLM PythonCore\3.11`과 시스템 PATH의 `E:\Python38_32`는
+  `E:\dev\_setup\cleanup-python-admin.ps1`(미리보기 → `-Apply`)로 정리합니다. 남겨둔 정상 항목: HKLM `3.14`(miniconda 자체 등록), HKCU `Astral`(uv).
+- 장기 계획은 프로젝트별 `uv` 환경(`.venv` + `uv.lock`) 전환이며, 전환하면 `run.bat`은 자동으로 `.venv`를 우선 사용합니다.
+
 ## 세 영역의 분리 (수집 / 매매 / 전략·검증)
 
 파일 위치를 옮기지 않고 **누가 무엇을 읽고 쓰는가**로 경계를 정했습니다 (프로세스도 서로 독립):
@@ -167,9 +182,17 @@ src/
 ## 처음 세팅
 
 1. 키움증권 REST API 포털(openapi.kiwoom.com)에서 **모의투자용** App Key/Secret 발급
-2. `.env.example` → `.env` 복사 후 값 채우기:
-   - `KIWOOM_APP_KEY`, `KIWOOM_APP_SECRET`, `DATA_DIR`, `LOG_DIR`, `ENV_NAME`
-   - `DASHBOARD_PASSWORD` — 대시보드 로그인 비밀번호. **비워두면 대시보드가 실행을 거부합니다** (안전장치)
+2. **키와 설정 값 준비 — 두 파일로 나뉩니다** (둘 다 git에 올라가지 않음):
+   - **중앙 `.env`** (`E:\dev\.env`, 회사는 `D:\dev\.env`): 모든 프로젝트가 공유하는 API 키 — `KIWOOM_APP_KEY`, `KIWOOM_APP_SECRET`.
+     `E:\dev\_setup\keys.bat set KIWOOM_APP_KEY`처럼 값을 화면에 안 보이게 입력해 저장하거나,
+     이미 프로젝트 `.env`에 키가 있으면 `E:\dev\_setup\keys.bat migrate project/trading-system --apply`로 옮깁니다
+     (같은 이름 폴더가 `github\`에도 있어서 이름만 쓰면 안 되고 `project/`를 붙여야 합니다). 코드는 프로젝트 폴더에서
+     위로 올라가며 처음 만나는 `.env`를 중앙 파일로 쓰고, `DEV_ENV_FILE` 환경변수로 위치를 직접 지정할 수도 있습니다.
+   - **프로젝트 `.env`** (`.env.example` 복사): 이 프로젝트/컴퓨터 전용 값 — `DATA_DIR`, `LOG_DIR`, `ENV_NAME`,
+     `DASHBOARD_PASSWORD`(대시보드 로그인 비밀번호, **비워두면 대시보드가 실행을 거부**하는 안전장치).
+     `DATA_DIR=./data`처럼 상대경로를 써도 실행 위치와 상관없이 프로젝트 폴더 기준으로 해석됩니다.
+   - 읽는 우선순위: 프로젝트 `.env` > 이미 설정된 OS 환경변수(`load-env.ps1`) > 중앙 `.env`. 같은 이름이 둘 다 있으면
+     프로젝트 값이 이깁니다 (이 프로젝트만 다른 키를 쓰고 싶을 때). 점검은 `E:\dev\_setup\keys.bat check`.
    (`.env`와 `data/` 폴더는 git에 올라가지 않으므로, **컴퓨터를 옮길 때마다 이 단계는 매번 새로 해야 합니다**)
 3. `pip install -r requirements.txt` (conda 가상환경 활성화된 상태에서)
 4. **필드명 확인 (최초 1회, 중요)**
@@ -227,7 +250,7 @@ git에 포함되지 않습니다 — 컴퓨터별로 한 번씩 아래처럼 만
 
 Git으로 옮겨가는 건 **코드뿐**입니다. 아래는 컴퓨터마다 별도로 해야 합니다.
 
-- `.env` 새로 작성 (API 키, 경로, `ENV_NAME`, `DASHBOARD_PASSWORD`)
+- 중앙 `.env`에 API 키 등록(`keys.bat set/migrate`) + 프로젝트 `.env` 새로 작성 (`DATA_DIR`, `LOG_DIR`, `ENV_NAME`, `DASHBOARD_PASSWORD`) — 위 "처음 세팅" 2번 참고
 - `data/db/*.db`(또는 이관 전이라면 `data/market_data.db`) 재수집 (`run.bat collect`) — DB 파일 자체를 git에 올리지 않음.
   컴퓨터 사이에 옮길 땐 파일 단위라 편합니다: 가벼운 `daily.db`/`trading.db`/`collection.db`만 복사하고 수십 GB인 `minute.db`는
   각 컴퓨터에서 받거나, 필요할 때만 복사하세요 (복사 전에 그 컴퓨터의 수집/실시간 프로세스를 멈추세요)
@@ -304,7 +327,7 @@ run.bat catalog                    # 데이터 카탈로그 전체 재집계 + �
 키움 웹소켓 실시간 체결가(API ID `0B`)와 호가잔량(API ID `0D`, 매도/매수 10단)을
 **한 세션에서** 동시에 구독합니다. `kiwoom-client` 라이브러리(REST 호출에도 쓰는 바로 그
 라이브러리)의 `KiwoomWebSocket`을 직접 씁니다 — 별도 설치나 `kiwoomcli setup` 같은
-사전 준비 없이 `.env`의 `KIWOOM_APP_KEY`/`SECRET`을 그대로 씁니다.
+사전 준비 없이 중앙(또는 프로젝트) `.env`의 `KIWOOM_APP_KEY`/`SECRET`을 그대로 씁니다.
 
 (처음엔 공식 CLI `kwcli`를 서브프로세스 두 개로 띄우는 방식으로 만들었는데, 실측해보니
 같은 계정으로 실시간 웹소켓 로그인을 두 번 하면 키움 서버가 먼저 연결을 끊어버렸습니다

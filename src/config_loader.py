@@ -39,6 +39,13 @@ def load_env_files() -> Path | None:
     central = find_central_env()
     if central:
         load_dotenv(central, override=False)
+
+    # DATA_DIR=./data 같은 상대경로는 "실행한 위치" 기준이 되어, 다른 폴더에서 스크립트를 돌리면
+    # 엉뚱한 곳에 빈 data/ 폴더와 새 DB를 만들어 버립니다. 프로젝트 폴더 기준 절대경로로 고정합니다.
+    for name in ("DATA_DIR", "LOG_DIR"):
+        value = os.getenv(name, "").strip()
+        if value and not Path(value).is_absolute():
+            os.environ[name] = str((PROJECT_ROOT / value).resolve())
     return central
 
 
