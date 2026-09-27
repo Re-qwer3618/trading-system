@@ -80,6 +80,14 @@ def _collect_minute(provider, store: MarketDataStore, symbol: str, opts: Collect
     interval = f"{opts.minute_scope}m"
     span = store.intraday_span(symbol, interval)
     exhausted = store.is_exhausted(symbol, interval)
+    had_no_rows = span["rows"] == 0
+
+    # 거래정지/관리종목 등으로 서버에 분봉 자체가 없다고 이미 확인된 종목은 API를 다시 부르지 않습니다
+    # (실측: 이런 종목은 일봉은 정상 응답하지만 분봉 API는 빈 필드짜리 레코드 1개만 돌려줍니다 —
+    # 오류가 아니라 "체결이 없어 만들 분봉이 없다"는 정상 응답이라 매번 재시도해도 결과가 바뀌지 않습니다).
+    if exhausted and had_no_rows:
+        return "분봉 없음(서버 데이터 없음, 확인됨 — 재시도 안 함)"
+
     first_date = span["first_ts"][:10] if span["first_ts"] else None
     last_date = span["last_ts"][:10] if span["last_ts"] else None
 
@@ -102,6 +110,11 @@ def _collect_minute(provider, store: MarketDataStore, symbol: str, opts: Collect
     if reason == "end":
         # 서버가 "더 이어받을 게 없다"고 답함 = 서버가 가진 가장 오래된 분봉까지 받은 것.
         store.set_exhausted(symbol, interval)
+    elif had_no_rows and len(df) == 0 and reason in ("end", "stop"):
+        # 한 번도 분봉이 없던 종목이 이번에도 0건 + 정상 응답(중단/페이지상한이 아님) — 거래정지 등으로
+        # 서버에 분봉 자체가 없다고 확인된 것으로 보고 표식을 남겨 다음부터 재시도하지 않습니다.
+        store.set_exhausted(symbol, interval)
+        return f"분봉 없음(서버 데이터 없음으로 새로 확인됨 — 다음부터 재시도 안 함)"
     tail = {"end": "서버 끝까지", "stop": "목표 구간 도달", "max_pages": "페이지 상한",
             "cancelled": "중단됨"}.get(reason, "")
     return f"분봉 {mode} {len(df)}건({tail})"
