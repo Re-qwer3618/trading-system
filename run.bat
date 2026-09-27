@@ -9,6 +9,8 @@ REM        run.bat catalog [--purge-orphans [--apply]]   (잔재 종목 데이�
 REM                          일봉·기본정보도 없는 채로 남은 옛 실시간 틱/분봉만 지움 — 미리보기 후 --apply)
 REM        run.bat migrate-db [--check]       (단일 DB 파일을 도메인별 파일로 분리, 1회)
 REM        run.bat research [--scope top_cap^|watchlist^|random] [--n 300] [--start 2021-01-01] [--horizon 5] [--stop 2] [--minute]
+REM        run.bat screen [--scope top_cap^|watchlist^|random] [--n 300] [--top 10] [--add]
+REM                        (research로 검증된 규칙으로 오늘 상승 후보를 찾아 관심종목에 추가 — 기본은 미리보기, --add로 실제 추가)
 REM        run.bat collect-index [001 101]
 REM        run.bat realtime 005930 [000660 ...] [--real] [--no-orderbook]
 REM        run.bat realtime --watchlist [--real] [--no-orderbook]
@@ -76,6 +78,8 @@ if "%1"=="backtest" (
     "%PY%" src\migrate_split_db.py %2
 ) else if "%1"=="research" (
     "%PY%" src\research_strategy.py %2 %3 %4 %5 %6 %7 %8 %9
+) else if "%1"=="screen" (
+    "%PY%" src\screen_candidates.py %2 %3 %4 %5 %6 %7 %8
 ) else if "%1"=="live-trade" (
     "%PY%" src\live_trade.py %2 %3 %4 %5
 ) else if "%1"=="analyze-history" (
