@@ -92,6 +92,14 @@ def collect_all(minute: bool = False, tick: bool = False, info: bool = False,
     data_cfg = config.get("data", {})
     intraday_cfg = data_cfg.get("intraday", {})
 
+    # 대시보드에서 시작한 수집 작업(collection_jobs)과 동시에 돌면 같은 DB 파일에 두 프로세스가
+    # 한꺼번에 쓰기를 시도해 "database is locked"가 나기 쉽습니다(실측 확인됨). 작업 스케줄러처럼
+    # 사람이 지켜보지 않는 실행에서는 충돌하는 대신 조용히 건너뛰고 다음 스케줄에 다시 시도합니다.
+    active = store.active_job()
+    if active is not None:
+        log.warning(f"대시보드 수집 작업 #{active['id']}({active['status']})이 이미 돌고 있어 이번 실행을 건너뜁니다.")
+        return
+
     if symbols:
         targets = list(symbols)
     elif watchlist:

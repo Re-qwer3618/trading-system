@@ -321,9 +321,18 @@ run.bat catalog                    # 데이터 카탈로그 전체 재집계 + �
 네임스페이스/메서드 목록이 함께 나오니, 그걸 보고 `kiwoom_rest_provider.py` 상단의
 후보 리스트를 수정하거나 `run.bat inspect-universe`로 먼저 확인해보세요.
 
-**장 마감 후 자동 실행(Windows 작업 스케줄러)**: 작업 스케줄러 → 새 작업 만들기 →
-트리거 "매일 16:00" → 동작 "프로그램 시작" → `D:\dev\project\trading-system\run.bat` →
-인수 `collect-all --minute`. (`run.bat main`도 같은 방식으로 매매 시간에 맞춰 등록 가능)
+**장 마감 후 자동 실행(Windows 작업 스케줄러)**: `register_eod_task.ps1`을 한 번 실행하면
+평일 16:00에 `scheduled_eod_update.ps1`(오늘 실시간 틱을 분봉에 합치는 `close-day` → 전체 종목
+일봉/분봉/틱봉 증분 갱신 `collect-all --minute --tick`)을 자동 실행하도록 등록됩니다.
+```
+powershell -ExecutionPolicy Bypass -File register_eod_task.ps1   # 등록(재실행하면 갱신)
+Get-ScheduledTask -TaskName "TradingSystem-EODUpdate" | Get-ScheduledTaskInfo   # 다음 실행 시각 확인
+Start-ScheduledTask -TaskName "TradingSystem-EODUpdate"                        # 지금 수동 실행(테스트)
+Unregister-ScheduledTask -TaskName "TradingSystem-EODUpdate" -Confirm:$false   # 삭제
+```
+대시보드에서 수집 작업이 이미 돌고 있으면(`collection_jobs`) `collect_all.py`가 충돌 없이
+조용히 건너뛰고 다음 스케줄에 다시 시도합니다. 로그: `logs\eod_update_YYYYMMDD.log`.
+전체 종목(수천 개) x 일봉/분봉/틱봉이라 보통 1~3시간 걸립니다.
 
 ### 2) 실시간 데이터 수집 (체결 + 호가창)
 

@@ -52,6 +52,7 @@ Ctrl+C로 종료합니다.
 
 import sys
 import time
+import json
 import logging
 from datetime import datetime
 from zoneinfo import ZoneInfo
@@ -105,6 +106,17 @@ def _with_live_bar(df: pd.DataFrame, today: str, live_price: float) -> pd.DataFr
                    "low": live_price, "close": live_price, "volume": 0}
         df = pd.concat([df, pd.DataFrame([new_row])], ignore_index=True)
     return df
+
+
+def _write_heartbeat(store, market_open: bool, n_symbols: int, n_positions: int) -> None:
+    """매 주기(장중이든 대기중이든)마다 '이 프로세스가 지금 살아서 도는 중'이라는 표시를 남깁니다.
+    실측 확인된 문제: 신호가 안 바뀌면 decisions 테이블에 아무것도 안 쌓여서(_check_symbol의 의도된
+    동작), 대시보드만 봐서는 "조용한 정상"과 "멈춘 프로세스"를 구분할 수 없었습니다. 이 표식을
+    대시보드(계좌 현황 페이지)가 읽어서 마지막 점검 시각을 보여줍니다."""
+    store.set_setting("live_trade.heartbeat", json.dumps({
+        "ts": datetime.now(_KST).isoformat(timespec="seconds"),
+        "market_open": market_open, "symbols": n_symbols, "positions": n_positions,
+    }, ensure_ascii=False))
 
 
 def _check_symbol(symbol: str, store, broker, risk: RiskManager, llm_advisor, config: dict,
@@ -272,6 +284,7 @@ def run(symbols: list[str] | None, interval: int = 60):
         while True:
             if not _is_market_open():
                 log.info("장 시간(평일 09:00~15:30)이 아닙니다. 대기합니다...")
+                _write_heartbeat(store, market_open=False, n_symbols=len(symbols), n_positions=len(entry_prices))
                 time.sleep(interval)
                 continue
 
@@ -307,6 +320,7 @@ def run(symbols: list[str] | None, interval: int = 60):
                 except Exception as exc:  # 종목 하나 실패해도 나머지는 계속 진행
                     log.warning(f"[{symbol}] 확인 중 오류: {exc}")
 
+            _write_heartbeat(store, market_open=True, n_symbols=len(symbols), n_positions=len(entry_prices))
             time.sleep(interval)
     except KeyboardInterrupt:
         log.info("종료합니다.")

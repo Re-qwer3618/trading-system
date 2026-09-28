@@ -5,7 +5,10 @@
 """
 
 import sys
+import json
 from pathlib import Path
+from datetime import datetime
+from zoneinfo import ZoneInfo
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
 import streamlit as st
@@ -25,6 +28,37 @@ config = load_config()
 store = MarketDataStore(config["data"]["db_path"])
 symbols = store.symbols()
 selected = st.selectbox("종목 선택", symbols) if symbols else None
+
+# ---------------------------------------------------------------------------
+# live_trade.py 생존 표시 ("조용함"이 정상인지 멈춘 것인지 구분하기 위함)
+#
+# _check_symbol()은 신호가 바뀌거나 실제로 주문을 시도했을 때만 decisions에 기록합니다
+# (의도된 동작 — 매 60초 전 종목을 다 로그로 남기면 테이블이 금방 커짐). 그래서 관심종목이
+# 하루 종일 HOLD만 유지하면 decisions/체결내역이 조용한 게 정상입니다. 이 카드는 그것과 별개로
+# "프로세스가 지금 살아서 매 주기 점검하고 있는지"를 live_trade.py가 매 주기 남기는 심장박동
+# (settings.live_trade.heartbeat)으로 보여줍니다.
+# ---------------------------------------------------------------------------
+@st.fragment(run_every="5s")
+def _render_heartbeat():
+    raw = store.get_setting("live_trade.heartbeat")
+    if not raw:
+        st.warning("🔘 라이브 매매(live_trade.py) 실행 기록이 없습니다. 아직 시작 안 했거나, 시작 직후(첫 주기 전)일 수 있습니다.")
+        return
+    hb = json.loads(raw)
+    ts = datetime.fromisoformat(hb["ts"])
+    age = (datetime.now(ZoneInfo("Asia/Seoul")) - ts).total_seconds()
+    if age <= 150:
+        icon, label = "🟢", "정상 동작 중"
+    elif age <= 600:
+        icon, label = "🟠", "응답이 늦어지는 중 (확인 필요)"
+    else:
+        icon, label = "🔴", "중단된 것으로 보임 (프로세스 확인 필요)"
+    phase = "장중 감시" if hb["market_open"] else "장 시간 외 대기"
+    st.info(f"{icon} 라이브 매매 {label} · 마지막 점검 {ts.strftime('%H:%M:%S')} ({age:.0f}초 전) · "
+            f"{phase} · 관심종목 {hb['symbols']}개 · 보유 추적 {hb['positions']}개")
+
+
+_render_heartbeat()
 
 # ---------------------------------------------------------------------------
 # 상단 요약 카드
