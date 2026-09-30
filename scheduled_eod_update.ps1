@@ -3,7 +3,8 @@
 # 하는 일 (순서대로):
 #   1. close-day  : 오늘 실시간 수집기가 쌓은 체결 틱을 종목별 공식 분봉의 빈 구간에 이어붙이고,
 #                   공식 일봉이 아직 없는 종목은 정규장 틱으로 근사 일봉을 채웁니다.
-#   2. collect-all --minute --tick : universe+관심종목 전체의 일봉/분봉(증분)/틱봉을 키움 서버에서
+#   2. collect-index : 코스피/코스닥 지수 일봉 (대시보드 시장 차트/상대강도용)
+#   3. collect-all --minute --tick : universe+관심종목 전체의 일봉/분봉(증분)/틱봉을 키움 서버에서
 #                   다시 받아 옵니다(이미 있는 구간은 건드리지 않고 새 날짜만 이어붙임). 분봉은
 #                   과거로 더 파고들지 않고(--minute-days 생략 = 증분만) 오늘 하루치만 채웁니다 —
 #                   깊은 과거 확장은 이미 한 번 해뒀고(run.bat collect-all --minute-days max),
@@ -29,6 +30,10 @@ Write-Log "=== 장마감 갱신 시작 $(Get-Date -Format 'yyyy-MM-dd HH:mm:ss')
 try {
     & "$root\run.bat" close-day 2>&1 | Out-File -Append -Encoding utf8 $log
     Write-Log "--- close-day 완료 ---"
+
+    # 코스피/코스닥 지수 일봉 (대시보드 시장 차트·상대강도, 백테스트 알파 계산용). 몇 초면 끝남.
+    & "$root\run.bat" collect-index 2>&1 | Out-File -Append -Encoding utf8 $log
+    Write-Log "--- collect-index 완료 ---"
 
     & "$root\run.bat" collect-all --minute --tick 2>&1 | Out-File -Append -Encoding utf8 $log
     Write-Log "--- collect-all 완료 ---"

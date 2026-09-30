@@ -260,9 +260,63 @@ class KiwoomRestProvider(BaseDataProvider):
         out = out.sort_values("date")
 
         if start_date:
-            out = out[out["date"] > start_date]
+            # 마지막 저장일 당일 봉도 다시 받아 덮어씁니다 — fetch_ohlcv와 같은 이유(장중에 저장된
+            # 미완성 봉을 확정값으로 교체).
+            out = out[out["date"] >= start_date]
 
         return out.reset_index(drop=True)
+
+    @staticmethod
+    def _index_market_type(index_code: str) -> str:
+        """업종코드 -> ka20001의 시장구분(0:코스피, 1:코스닥, 2:코스피200)."""
+        return {"1": "1", "2": "2"}.get(index_code[:1], "0")
+
+    def fetch_index_snapshot(self, index_code: str = "001") -> dict:
+        """지수 현재가 스냅샷 (ka20001). 장중이면 실시간 값, 장 마감 후엔 그날 종가 기준입니다.
+
+        일봉(ka20006)/분봉 차트와 달리 이 API는 값이 100배 정수가 아니라 실제 소수로 옵니다
+        (실측: 코스피 cur_prc=-6838.04). 부호는 전일 대비 방향 표시라 가격류는 abs()합니다.
+        상승/하락/보합 종목 수(시장 폭)와 52주 최고/최저도 함께 돌려줍니다."""
+        raw = self.api.sector.industry_current_price(mrkt_tp=self._index_market_type(index_code), inds_cd=index_code)
+        d = normalize(raw)
+
+        def num(key, absolute=False):
+            v = d.get(key)
+            try:
+                v = float(v)
+            except (TypeError, ValueError):
+                return None
+            return abs(v) if absolute else v
+
+        return {
+            "index_code": index_code,
+            "price": num("cur_prc", True), "change": num("pred_pre"), "change_pct": num("flu_rt"),
+            "open": num("open_pric", True), "high": num("high_pric", True), "low": num("low_pric", True),
+            "rising": num("rising"), "flat": num("stdns"), "falling": num("fall"),
+            "upper_limit": num("upl"), "lower_limit": num("lst"),
+            "trade_value_eok": (num("trde_prica") or 0) / 100,  # 백만원 -> 억원
+            "high_52w": num("52wk_hgst_pric", True), "high_52w_date": d.get("52wk_hgst_pric_dt"),
+            "low_52w": num("52wk_lwst_pric", True), "low_52w_date": d.get("52wk_lwst_pric_dt"),
+        }
+
+    def fetch_index_minute(self, index_code: str = "001", minute_scope: str = "1") -> pd.DataFrame:
+        """지수 분봉 (업종분봉). 한 페이지(최근 900개 ≈ 2거래일치)만 받습니다 — 대시보드의 당일
+        지수 흐름 표시용이라 깊은 과거는 필요 없습니다. 값은 일봉처럼 100배 정수라 /100 합니다."""
+        raw = self.api.chart.industry_minute_chart(inds_cd=index_code, tic_scope=minute_scope)
+        _, records = extract_records(raw)
+        df = to_dataframe(records)
+        if df.empty:
+            return pd.DataFrame(columns=["timestamp", "open", "high", "low", "close", "volume"])
+        out = pd.DataFrame({
+            "timestamp": pd.to_datetime(df["cntr_tm"].astype(str), format="%Y%m%d%H%M%S", errors="coerce"),
+            "open": pd.to_numeric(df["open_pric"], errors="coerce").abs() / 100,
+            "high": pd.to_numeric(df["high_pric"], errors="coerce").abs() / 100,
+            "low": pd.to_numeric(df["low_pric"], errors="coerce").abs() / 100,
+            "close": pd.to_numeric(df["cur_prc"], errors="coerce").abs() / 100,
+            "volume": _to_int_volume(df["trde_qty"]),
+        }).dropna(subset=["timestamp", "close"])
+        out["timestamp"] = out["timestamp"].dt.strftime("%Y-%m-%d %H:%M:%S")
+        return out.sort_values("timestamp").reset_index(drop=True)
 
     def _fetch_intraday(self, symbol: str, tic_scope: str, method_candidates: list[str],
                          what: str, base_dt: str | None = None, max_pages: int | None = None,

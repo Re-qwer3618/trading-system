@@ -10,13 +10,13 @@ import sys
 from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
-import random
 from datetime import datetime
 from zoneinfo import ZoneInfo
 import streamlit as st
 import pandas as pd
 from ui_common import require_login, render_header
 from ui_charts import kiwoom_candle_chart, kiwoom_orderbook_html
+from ui_market import render_index_bar, render_market_panel
 from config_loader import load_config
 from data_layer.storage import MarketDataStore
 from core.factory import strategy_name_for
@@ -109,12 +109,9 @@ if basic_info:
     st.markdown("---")
 
 # ---------------------------------------------------------------------------
-# 상단: 지수 요약 (Mock — 실시간 지수 연동 전)
+# 상단: 지수 요약 (키움 업종현재가 실시간 — ui_market.py)
 # ---------------------------------------------------------------------------
-idx_col1, idx_col2 = st.columns(2)
-idx_col1.metric("코스피 (Mock)", "2,650.00", "+0.8%")
-idx_col2.metric("코스닥 (Mock)", "850.50", "+1.2%")
-st.caption("⚠️ 지수는 아직 실시간 연동 전이라 예시 값입니다.")
+render_index_bar(store, config)
 st.markdown("---")
 
 main_col, side_col = st.columns([2.2, 1])
@@ -140,15 +137,11 @@ with main_col:
         st.caption(f"데이터 기간: {shown['date'].min().date()} ~ {shown['date'].max().date()} · 휠로 확대/축소, 드래그로 이동")
 
 # ---------------------------------------------------------------------------
-# 우측: 시장 지표 미니 차트 (Mock)
+# 우측: 시장 차트 + 지표 + 선택 종목의 시장 대비 상대강도 (실데이터 — ui_market.py)
 # ---------------------------------------------------------------------------
 with side_col:
     st.subheader("시장 차트 및 지표")
-    market = st.radio("시장 선택", ["코스피", "코스닥"], horizontal=True)
-    random.seed(hash(market) % 1000)
-    mock_series = pd.Series([2400 + random.uniform(-50, 80) * i * 0.1 for i in range(60)])
-    st.line_chart(mock_series, height=260)
-    st.caption("⚠️ Mock 데이터입니다. 실제 지수 연동은 아직 없습니다.")
+    render_market_panel(store, config, selected, dark=st.session_state.get("chart_dark", False))
 
 st.markdown("---")
 

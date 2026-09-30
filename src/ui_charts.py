@@ -164,6 +164,40 @@ def kiwoom_candle_chart(
     return fig
 
 
+STOCK_LINE = "#F29B00"   # 상대강도 차트: 종목(주황) — 빨강/파랑은 상승/하락 의미라 피함
+INDEX_LINE = "#6B7280"   # 상대강도 차트: 지수(회색)
+
+
+def relative_strength_chart(stock: pd.DataFrame, index: pd.DataFrame, stock_label: str, index_label: str,
+                            height: int = 240, dark: bool = False) -> go.Figure:
+    """종목과 지수의 누적 수익률(%)을 같은 출발점(0%)에서 겹쳐 그립니다.
+    stock/index: date, close 컬럼. 두 시리즈에 모두 있는 날짜만 씁니다(휴장/거래정지 차이 정렬)."""
+    t = _THEMES["dark" if dark else "light"]
+    merged = stock[["date", "close"]].merge(index[["date", "close"]], on="date", suffixes=("_s", "_i"))
+    fig = go.Figure()
+    if merged.empty:
+        return fig
+    x = pd.to_datetime(merged["date"]).dt.strftime("%Y/%m/%d")
+    s_ret = (merged["close_s"] / merged["close_s"].iloc[0] - 1) * 100
+    i_ret = (merged["close_i"] / merged["close_i"].iloc[0] - 1) * 100
+    fig.add_trace(go.Scatter(x=x, y=s_ret, mode="lines", name=stock_label, line=dict(color=STOCK_LINE, width=2),
+                             hovertemplate="%{x}<br>" + stock_label + " %{y:+.2f}%<extra></extra>"))
+    fig.add_trace(go.Scatter(x=x, y=i_ret, mode="lines", name=index_label, line=dict(color=INDEX_LINE, width=1.6),
+                             hovertemplate="%{x}<br>" + index_label + " %{y:+.2f}%<extra></extra>"))
+    fig.add_hline(y=0, line=dict(color=t["axis"], width=1, dash="dot"))
+    step = max(1, len(x) // 5)
+    fig.update_xaxes(type="category", tickmode="array", tickvals=list(x[::step]),
+                     ticktext=list(pd.to_datetime(merged["date"]).dt.strftime("%m/%d")[::step]),
+                     showgrid=False, linecolor=t["axis"], tickfont=dict(size=10, color=t["text"]))
+    fig.update_yaxes(side="right", ticksuffix="%", showgrid=True, gridcolor=t["grid"], griddash="dot",
+                     zeroline=False, tickfont=dict(size=10, color=t["text"]))
+    fig.update_layout(height=height, paper_bgcolor=t["bg"], plot_bgcolor=t["bg"],
+                      font=dict(color=t["text"], family="Malgun Gothic, 맑은 고딕, sans-serif"),
+                      margin=dict(l=10, r=50, t=10, b=10), hovermode="x unified",
+                      legend=dict(orientation="h", yanchor="bottom", y=1.0, x=0, font=dict(size=11)))
+    return fig
+
+
 def _price_color(price: float, ref: float | None, t: dict) -> str:
     """기준가(전일종가) 대비 상승 빨강 / 하락 파랑 / 보합 기본색 — HTS 가격 색 규칙."""
     if ref is None or price == ref:
