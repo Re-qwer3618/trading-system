@@ -56,6 +56,17 @@
 - 관심종목(`watchlist`)과 전체 수집 종목(`store.symbols()`/`universe`)은 다른 개념입니다.
   실시간 매매/구독 대상은 항상 전자입니다.
 
+## 형제 프로젝트 stock_analysis와의 관계
+
+- **차트 심리분석 스킬(`chart-psychology`)의 원본은 `../stock_analysis/.claude/skills/chart-psychology`**입니다.
+  이 저장소의 `.claude/skills/chart-psychology`는 그 원본을 가리키는 정션이라(`link_shared_skills.ps1`, git 제외)
+  여기서 스킬을 고치면 실제로는 stock_analysis 파일이 바뀝니다 — 스킬 수정은 stock_analysis 세션에서 하고,
+  그쪽 CLAUDE.md의 수정 규칙(principles.md는 사용자 승인 후에만 등)을 따르세요. 새 PC에서는 정션을 한 번 만들어야 합니다.
+- stock_analysis는 이 프로젝트의 DB를 **읽기 전용** 데이터 소스로 씁니다(`../stock_analysis/core/data.py`의 "trading" 소스).
+  DB 파일 구성(`data/db/*.db`)이나 테이블 이름(`ohlcv`, `index_ohlcv`, `universe`, `intraday_ohlcv`)을 바꾸면 그쪽도 함께 고치세요.
+- 역할 분담: stock_analysis = 강의·노트에서 규칙을 만들고 Claude가 심리 해석, trading-system = 그 규칙을 대량 데이터로
+  통계 검증(`research/`)하고 자동 실행. 강의 자료에서 뽑은 규칙 카드는 유료 강의 파생물이라 **어느 저장소에도 커밋하지 않습니다**.
+
 ## 참고
 
 - README.md: 전체 기능, 폴더 구조, 세팅 절차, 명령어 목록.

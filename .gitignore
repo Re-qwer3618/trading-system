@@ -11,3 +11,5 @@ trading-system.zip
 .claude/launch.json
 .claude/settings.local.json
 .claude/scheduled_tasks.lock
+# chart-psychology 스킬은 stock_analysis가 원본 — 이 PC에 정션으로 연결(link_shared_skills.ps1), git에는 안 올림
+.claude/skills/chart-psychology

@@ -209,6 +209,9 @@ src/
 7. 백테스트: `run.bat backtest 005930`
 8. 모의투자로 하루치 신호 확인/주문: `run.bat main 005930`
 9. 대시보드 실행: `run.bat app` (로그인+멀티페이지, 추천) 또는 `run.bat dashboard` (단일페이지 구버전)
+10. (선택) 차트 심리분석 스킬 연결: 형제 폴더에 `stock_analysis` 저장소를 클론한 뒤
+    `powershell -ExecutionPolicy Bypass -File link_shared_skills.ps1` — 스킬 원본(stock_analysis)을 이 프로젝트의
+    `.claude/skills/chart-psychology`로 정션 연결합니다(PC마다 한 번, git 제외).
 
 ### 기존 데이터를 갖고 있다면 (연속조회/수정주가 적용 전에 수집한 경우)
 
