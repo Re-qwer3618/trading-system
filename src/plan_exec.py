@@ -12,8 +12,10 @@ live_trade.py가 config의 plan_follow.enabled가 true일 때만 이 모듈을 �
 필요한 오늘 시가도 같이 옵니다. 주문 가격은 지금 현재가 기준(broker.place_order(price=...))이라 마지막 저장
 일봉 종가(=장중에는 전일 종가)로 주문이 나가서 체결되지 않는 기존 한계를 피합니다.
 
-비중(종목당 %), 장중 손절(%), 동시 보유 한도는 기존과 똑같이 대시보드 리스크 설정을 따릅니다. 계획의 손절가·
-목표가·보유기간은 그와 별도로 함께 적용됩니다(먼저 닿는 쪽으로 매도).
+비중(종목당 %)과 동시 보유 한도는 대시보드 리스크 설정을 따릅니다. 손절은 **계획 손절가만** 씁니다 — 대시보드의
+장중 손절(%)은 계획 매매에 적용하지 않습니다(2026-10-03 사용자 결정: 과거 재현에서 5% 장중 손절이 돌파 직후 흔들림에
+먼저 걸려 승률이 57%→37%로 떨어짐). 다시 함께 쓰려면 config plan_follow.risk_stop: true. 기존 전략 경로(_check_symbol)는
+여전히 대시보드 장중 손절을 씁니다. 계획 손절가는 장 후반(entry.after 이후)에만 판단합니다(종가 기준 손절에 맞춤).
 
 계획 유효성: asof(기준일) < 오늘 인 가장 최근 파일만 쓰고, 그 asof가 DB의 '오늘 이전 마지막 거래일'과 같아야
 합니다. 장 마감 후 계획 생성이 실패했으면 그 전날 계획이 남아 있어도 쓰지 않습니다(묵은 계획으로 매매 방지).
@@ -100,6 +102,7 @@ class PlanExecutor:
         self.broker = broker
         self.quote_fn = quote_fn
         self.slippage_pct = float(config.get("plan_follow", {}).get("order_slippage_pct", 0.5))
+        self.use_risk_stop = bool(config.get("plan_follow", {}).get("risk_stop", False))
         self.doc: dict | None = None
         self.plans: dict[str, dict] = {}
         self._loaded_for: str | None = None
@@ -231,13 +234,12 @@ class PlanExecutor:
         self.store.log_decision(symbol, "PLAN_EXIT", "NEUTRAL", "SELL" if ok else "SELL_FAILED", detail)
         log.info(f"[{symbol}] {detail}")
 
-    @staticmethod
-    def _exit_reason(trade: dict, plan: dict, price: float, risk, now: datetime, today: str) -> str:
+    def _exit_reason(self, trade: dict, plan: dict, price: float, risk, now: datetime, today: str) -> str:
         entry = trade["entry_price"]
         if price >= plan["target"]:
             return f"목표가 {plan['target']:,} 도달"
         risk_stop = risk.stop_loss_price(entry)
-        if price <= risk_stop:
+        if self.use_risk_stop and price <= risk_stop:
             return f"리스크 손절 (진입 {entry:,.0f} → 손절선 {risk_stop:,.0f}, 대시보드 {risk.risk_limit_pct}%)"
         hhmm = _hhmm(now)
         if hhmm >= plan["entry"]["after"] and price < plan["stop"]:
