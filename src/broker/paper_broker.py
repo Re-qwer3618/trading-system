@@ -47,8 +47,8 @@ class PaperBroker(BaseBroker):
     def get_position(self, symbol: str) -> int:
         return self.state["positions"].get(symbol, 0)
 
-    def place_order(self, symbol: str, side: str, quantity: int) -> dict:
-        price = self.get_price(symbol)
+    def place_order(self, symbol: str, side: str, quantity: int, price: float | None = None) -> dict:
+        price = price if price is not None else self.get_price(symbol)
         cost = price * quantity
 
         if side == "BUY":

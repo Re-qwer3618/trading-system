@@ -71,12 +71,22 @@ class KiwoomRestBroker(BaseBroker):
                 return int(qty_val)
         return 0
 
-    def place_order(self, symbol: str, side: str, quantity: int) -> dict:
+    def place_order(self, symbol: str, side: str, quantity: int, price: float | None = None,
+                    slippage_pct: float = 0.5) -> dict:
         # round_to_tick()은 정밀도를 지키려고 Decimal을 반환하는데, 그대로 요청 바디에
         # 넣으면 httpx의 기본 JSON 인코더가 못 읽어서 주문이 "Object of type Decimal
         # is not JSON serializable"로 매번 실패합니다 (실측 확인됨). 원화 주가는 항상
         # 정수 단위라 int로 바꿔도 정밀도 손실이 없습니다.
-        price = int(round_to_tick(self.get_price(symbol)))
+        #
+        # price(현재가)를 주면 그 가격에서 slippage_pct만큼 불리한 쪽으로 지정가를 냅니다(매수는 위, 매도는 아래).
+        # 지정가가 시장가보다 유리하면 거래소는 더 좋은 호가로 체결하므로 사실상 '범위 제한 시장가'입니다.
+        # price 없이 부르면 예전처럼 마지막 저장 일봉 종가로 냅니다 — 장중에는 그 값이 전일 종가라, 오른 종목
+        # 매수·내린 종목 매도(손절)가 체결되지 않고 걸려만 있을 수 있습니다(plan_exec.py는 항상 price를 넘김).
+        if price is not None:
+            factor = 1 + slippage_pct / 100 if side == "BUY" else 1 - slippage_pct / 100
+            price = int(round_to_tick(price * factor))
+        else:
+            price = int(round_to_tick(self.get_price(symbol)))
         # kt10000/kt10001 스펙 확인 결과(spec_show), ord_qty/ord_uv는 문자열 타입이어야
         # 하고(정수를 그대로 넣으면 "1517: 파라미터=ord_qty 원인=타입 불일치"로 거부됨,
         # 실측 확인됨), dmst_stex_tp는 "01"이 아니라 "KRX"/"NXT"/"SOR" 중 하나,

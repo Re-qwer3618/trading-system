@@ -78,7 +78,7 @@ _TABLE_DOMAIN = {
     "intraday_ohlcv": "minute",  # 틱봉(interval이 't'로 끝남)은 _intraday_ref가 tick으로 보냄
     "realtime_ticks": "tick", "realtime_orderbook": "orderbook",
     "decisions": "trading", "decision_committee": "trading", "tuning_runs": "trading",
-    "tuning_transitions": "trading", "settings": "trading", "watchlist": "trading",
+    "tuning_transitions": "trading", "settings": "trading", "watchlist": "trading", "plan_trades": "trading",
     "data_catalog": "collection", "collection_jobs": "collection", "collection_job_items": "collection",
     "realtime_merge_log": "collection",
 }
@@ -308,6 +308,34 @@ class MarketDataStore:
                              ("note", "TEXT DEFAULT ''")):
                 if col not in existing_cols:
                     conn.execute(f"ALTER TABLE {wl_schema}.watchlist ADD COLUMN {col} {ddl}")
+
+            # 매매 계획 실행 기록 (plan_exec.py). stock_analysis가 만든 계획(plan_id) 하나당 한 줄이고,
+            # 복기(stock_analysis review_trades.py)가 이 표를 읽기 전용으로 읽습니다.
+            #  status: submitted(매수 주문 냄) -> open(계좌에 보유 확인) -> closing(매도 주문 냄) -> closed
+            #          | unfilled(매수 주문 후 다음 날까지 보유 안 잡힘)
+            #  entry_price/exit_price는 주문 시점 현재가입니다 (모의투자 서버에서 체결 단가 조회가 제한적이라 근사).
+            self._ddl(conn, """
+                CREATE TABLE IF NOT EXISTS plan_trades (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    plan_id TEXT NOT NULL,
+                    symbol TEXT NOT NULL,
+                    name TEXT,
+                    strategy TEXT,
+                    version TEXT,
+                    status TEXT NOT NULL,
+                    plan TEXT,
+                    qty INTEGER,
+                    buy_submitted_at TEXT,
+                    entry_date TEXT,
+                    entry_price REAL,
+                    exit_submitted_at TEXT,
+                    exit_date TEXT,
+                    exit_price REAL,
+                    exit_reason TEXT,
+                    note TEXT DEFAULT '',
+                    updated_at TEXT NOT NULL
+                )
+            """)
 
             # 데이터 카탈로그: (종목, 데이터종류)별로 "무엇이 어디부터 어디까지 몇 건 들어있나"를
             # 한 줄로 요약한 목록. 수천만 행짜리 원본 테이블을 매번 집계하지 않고도 대시보드가
@@ -880,6 +908,76 @@ class MarketDataStore:
     def remove_from_watchlist(self, symbol: str) -> None:
         with self._connect() as conn:
             conn.execute("DELETE FROM watchlist WHERE symbol = ?", (symbol,))
+
+    # ------------------------------------------------------------------
+    # 매매 계획 실행 기록 (plan_exec.py)
+    # ------------------------------------------------------------------
+
+    _PLAN_TRADE_ACTIVE = ("submitted", "open", "closing")
+
+    def add_plan_trade(self, plan: dict, strategy: str, version: str, qty: int, order_price: float,
+                       submitted_at: str | None = None) -> int:
+        import json
+        now = datetime.now().isoformat(timespec="seconds")
+        submitted_at = submitted_at or now
+        with self._connect("trading") as conn:
+            cur = conn.execute(
+                """INSERT INTO plan_trades (plan_id, symbol, name, strategy, version, status, plan, qty,
+                                            buy_submitted_at, entry_price, updated_at)
+                   VALUES (?, ?, ?, ?, ?, 'submitted', ?, ?, ?, ?, ?)""",
+                (plan["plan_id"], plan["symbol"], plan.get("name"), strategy, version,
+                 json.dumps(plan, ensure_ascii=False), qty, submitted_at, order_price, now),
+            )
+            return cur.lastrowid
+
+    def active_plan_trade(self, symbol: str) -> dict | None:
+        """이 종목의 진행 중인 계획 매매(submitted/open/closing) 중 가장 최근 것."""
+        import json
+        with self._connect("trading") as conn:
+            conn.row_factory = sqlite3.Row
+            row = conn.execute(
+                f"""SELECT * FROM plan_trades WHERE symbol = ? AND status IN ({",".join("?" * len(self._PLAN_TRADE_ACTIVE))})
+                    ORDER BY id DESC LIMIT 1""", (symbol, *self._PLAN_TRADE_ACTIVE)).fetchone()
+        if row is None:
+            return None
+        rec = dict(row)
+        rec["plan"] = json.loads(rec["plan"]) if rec.get("plan") else {}
+        return rec
+
+    def active_plan_symbols(self) -> list[str]:
+        with self._connect("trading") as conn:
+            rows = conn.execute(
+                f"SELECT DISTINCT symbol FROM plan_trades WHERE status IN ({','.join('?' * len(self._PLAN_TRADE_ACTIVE))})",
+                self._PLAN_TRADE_ACTIVE).fetchall()
+        return [r[0] for r in rows]
+
+    def plan_trade_exists(self, plan_id: str, today: str) -> bool:
+        """이 계획으로 이미 주문을 냈나. 주문 거부(rejected)는 그날만 막습니다 — 공휴일(장 안 열림) 거부 뒤
+        다음 거래일에 다시 시도할 수 있게 (live_trade는 공휴일 달력이 없음)."""
+        with self._connect("trading") as conn:
+            return conn.execute(
+                """SELECT 1 FROM plan_trades WHERE plan_id = ?
+                   AND NOT (status = 'rejected' AND substr(buy_submitted_at, 1, 10) < ?) LIMIT 1""",
+                (plan_id, today)).fetchone() is not None
+
+    def update_plan_trade(self, trade_id: int, **fields) -> None:
+        if not fields:
+            return
+        fields["updated_at"] = datetime.now().isoformat(timespec="seconds")
+        sets = ", ".join(f"{k} = ?" for k in fields)
+        with self._connect("trading") as conn:
+            conn.execute(f"UPDATE plan_trades SET {sets} WHERE id = ?", (*fields.values(), trade_id))
+
+    def last_index_date_before(self, date: str, index_code: str = "001") -> str | None:
+        """date 이전의 마지막 거래일 (지수 일봉 기준). 공휴일 달력 대신 '실제로 장이 열린 날'로 씁니다."""
+        with self._connect("daily") as conn:
+            row = conn.execute("SELECT MAX(date) FROM index_ohlcv WHERE index_code = ? AND date < ?",
+                               (index_code, date)).fetchone()
+        return row[0] if row else None
+
+    def plan_trades(self, limit: int = 200) -> pd.DataFrame:
+        with self._connect("trading") as conn:
+            return pd.read_sql_query("SELECT * FROM plan_trades ORDER BY id DESC LIMIT ?", conn, params=(limit,))
 
     def seed_watchlist_if_empty(self, symbols: list[str]) -> None:
         """watchlist가 완전히 비어있을 때만(최초 1회) 채웁니다 — 이미 관리 중인 목록이

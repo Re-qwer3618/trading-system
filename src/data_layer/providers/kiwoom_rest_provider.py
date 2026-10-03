@@ -412,6 +412,17 @@ class KiwoomRestProvider(BaseDataProvider):
                                           "list_count", "last_price", "listed_date", "state"])
         return pd.concat(frames, ignore_index=True)
 
+    def fetch_quote(self, symbol: str) -> dict:
+        """지금 시세 한 번 (ka10001): 현재가·오늘 시가/고가/저가·기준가(전일 종가). plan_exec.py가 쓰는 장중 가격.
+        실시간 수집기(stream_collector)를 켜지 않아도 동작합니다. 가격 필드는 등락 방향 부호가 붙어 와서 abs()."""
+        data = normalize(self.api.stock_info.basic_stock_info(stk_cd=symbol))
+
+        def num(key):
+            v = data.get(key)
+            return abs(float(v)) if v not in (None, "") else None
+        return {"symbol": symbol, "price": num("cur_prc"), "open": num("open_pric"), "high": num("high_pric"),
+                "low": num("low_pric"), "base": num("base_pric"), "volume": num("trde_qty")}
+
     def fetch_basic_info(self, symbol: str) -> dict:
         """종목 기본정보 (ka10001): PER/PBR/EPS/BPS/ROE, 시가총액, 매출액/영업이익/순이익 등.
         차트가 아니라 시점 스냅샷 하나라 연속조회가 필요 없습니다. PER/ROE 등은 외부

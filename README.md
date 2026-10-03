@@ -413,6 +413,27 @@ run.bat live-trade --interval 30   # 확인 주기를 30초로
 특히 실제 주문 체결가는 아직 실시간가가 아니라 브로커가 반환하는 마지막 저장 종가
 기준이라, 장중 변동이 큰 날은 신호 판단 시점 가격과 체결가가 다를 수 있습니다.
 
+### 2-3) 매매 계획 실행 (plan_follow) — stock_analysis 전략의 모의 운영
+
+무엇을 언제 살지는 형제 프로젝트 **stock_analysis**가 정하고, 여기서는 그 계획을 판단 없이 실행만 합니다.
+
+```
+(장 마감 후, stock_analysis)  python plans.py          # data/plans/plans_<기준일>.json — 다음 거래일 매매 계획
+(확인)                        run.bat plans [--sync]   # 쓸 계획·유효성·진행 중인 계획 매매 / 관심종목 동기화
+(다음 거래일)                 run.bat live-trade       # config plan_follow.enabled: true 일 때 계획 실행 (기본 false)
+(복기, stock_analysis)        python review_trades.py  # 계획 → 실행(plan_trades) → 결과
+```
+
+- 켜는 법: `config/base.yaml`의 `plan_follow.enabled: true`. 끄면 live_trade 동작은 전과 똑같습니다.
+- 계획 종목은 관심종목에 `source=plan`, 전략 그룹 `plan_follow`로 자동으로 들어가고, 다음 계획에 없고 보유도 아니면 빠집니다.
+  직접 추가한 관심종목은 건드리지 않습니다.
+- 장중 가격은 키움 REST 시세(ka10001)를 직접 조회합니다 — 실시간 수집기 없이도 동작하고, 계획의 시가 조건에 필요한 오늘 시가도 함께 옵니다.
+- 주문은 현재가 ± `order_slippage_pct`(기본 0.5%) 지정가로 냅니다(`broker.place_order(price=...)`). 위의 "마지막 저장 종가로
+  주문" 한계는 기존 전략 경로에만 남아 있습니다.
+- 비중·장중 손절·동시 보유 한도는 대시보드 리스크 설정 그대로, 계획의 손절가(장 후반)·목표가·보유기간이 함께 적용됩니다.
+- 기록: `trading.db`의 `plan_trades`(submitted → open → closing → closed / unfilled / rejected), `decisions`의 `PLAN_*` 신호.
+- 계획 기준일이 DB의 직전 거래일과 다르면(계획 생성·DB 갱신 실패) 그날은 계획을 쓰지 않습니다.
+
 ### 3) 분석 에이전트 (1차, 규칙기반)
 
 지금은 LLM 없이 pandas로 계산하는 "1단계 규칙기반" 버전입니다. `llm/advisor.py`와

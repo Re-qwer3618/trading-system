@@ -64,8 +64,15 @@
   그쪽 CLAUDE.md의 수정 규칙(principles.md는 사용자 승인 후에만 등)을 따르세요. 새 PC에서는 정션을 한 번 만들어야 합니다.
 - stock_analysis는 이 프로젝트의 DB를 **읽기 전용** 데이터 소스로 씁니다(`../stock_analysis/core/data.py`의 "trading" 소스).
   DB 파일 구성(`data/db/*.db`)이나 테이블 이름(`ohlcv`, `index_ohlcv`, `universe`, `intraday_ohlcv`)을 바꾸면 그쪽도 함께 고치세요.
-- 역할 분담: stock_analysis = 강의·노트에서 규칙을 만들고 Claude가 심리 해석, trading-system = 그 규칙을 대량 데이터로
-  통계 검증(`research/`)하고 자동 실행. 강의 자료에서 뽑은 규칙 카드는 유료 강의 파생물이라 **어느 저장소에도 커밋하지 않습니다**.
+- 역할 분담 (2026-10-03 사용자 결정): **stock_analysis = 머리**(규칙 카드·정량 조건·번역 검증·통계 검증·전략 정의·복기),
+  **trading-system = 매매 엔진**(계획 실행·모의 운영·기록). 둘은 코드를 공유하지 않고 **매매 계획 파일**
+  (`../stock_analysis/data/plans/plans_<기준일>.json`, 형식은 그쪽 `core/plans.py` 맨 위)과 DB(서로 읽기 전용)로만 연결됩니다.
+  순환: plans.py(장 마감 후) → live_trade의 plan_exec(다음 거래일, `plan_follow.enabled`) → `plan_trades` →
+  review_trades.py 복기 → 카드·사례·조건 보완 → strategies.yaml version 올림. 자세한 건 `../stock_analysis/docs/매매순환.md`.
+- `src/plan_exec.py`는 계획을 **판단 없이 실행만** 합니다. 매매 판단을 여기에 넣고 싶어지면 그건 stock_analysis 전략(strategies.yaml)
+  쪽 일입니다. `plan_trades` 스키마를 바꾸면 그쪽 `core/trade_review.py`도 함께 고치세요.
+- 기존 `research/`(특징 조건 검증)·`screen_candidates.py`는 그대로 둡니다 — 이 프로젝트 자체 전략용입니다.
+- 강의 자료에서 뽑은 규칙 카드는 유료 강의 파생물이라 **어느 저장소에도 커밋하지 않습니다**.
 
 ## 참고
 

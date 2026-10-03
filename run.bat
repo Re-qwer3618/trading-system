@@ -15,6 +15,7 @@ REM        run.bat collect-index [001 101]
 REM        run.bat realtime 005930 [000660 ...] [--real] [--no-orderbook]
 REM        run.bat realtime --watchlist [--real] [--no-orderbook]
 REM        run.bat close-day [005930 000660 ...] [--date YYYY-MM-DD] [--force]
+REM        run.bat plans [--sync]              (다음 거래일 매매 계획 확인·관심종목 동기화, plan_trades 기록)
 REM        run.bat live-trade [005930 000660 ...] [--interval SEC]
 REM        run.bat analyze-history 005930
 REM        run.bat analyze-realtime 005930 [interval_sec]
@@ -80,6 +81,8 @@ if "%1"=="backtest" (
     "%PY%" src\research_strategy.py %2 %3 %4 %5 %6 %7 %8 %9
 ) else if "%1"=="screen" (
     "%PY%" src\screen_candidates.py %2 %3 %4 %5 %6 %7 %8
+) else if "%1"=="plans" (
+    "%PY%" src\plans_status.py %2
 ) else if "%1"=="live-trade" (
     "%PY%" src\live_trade.py %2 %3 %4 %5
 ) else if "%1"=="analyze-history" (

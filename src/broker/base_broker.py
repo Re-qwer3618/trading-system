@@ -29,6 +29,7 @@ class BaseBroker(ABC):
         raise NotImplementedError
 
     @abstractmethod
-    def place_order(self, symbol: str, side: str, quantity: int) -> dict:
-        """side: 'BUY' 또는 'SELL'. 체결 결과를 dict로 반환."""
+    def place_order(self, symbol: str, side: str, quantity: int, price: float | None = None) -> dict:
+        """side: 'BUY' 또는 'SELL'. 체결 결과를 dict로 반환.
+        price: 주문 기준가(보통 지금 현재가). 주지 않으면 get_price()(마지막 저장 일봉 종가) 기준 — 기존 동작."""
         raise NotImplementedError

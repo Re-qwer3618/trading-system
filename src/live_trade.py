@@ -48,6 +48,10 @@ SELL을 내기 전까지는 손실이 risk_limit_pct를 넘어도 자동으로 �
     python src/live_trade.py --interval 30         # 확인 주기(초), 기본 60
 
 Ctrl+C로 종료합니다.
+
+매매 계획 실행(plan_exec.py): config의 plan_follow.enabled가 true이면, stock_analysis가 장 마감 후 만든
+계획(plans_<기준일>.json)의 종목과 진행 중인 계획 매매 종목은 위의 전략 신호 대신 plan_exec가 처리합니다
+(계획 종목은 관심종목에 source=plan으로 자동 추가/제거). 기본은 false — 켜지 않으면 동작이 전과 같습니다.
 """
 
 import sys
@@ -62,8 +66,9 @@ import pandas as pd
 
 from config_loader import load_config
 from data_layer.storage import MarketDataStore
-from core.factory import build_broker, build_strategy, build_llm_advisor
+from core.factory import build_broker, build_strategy, build_llm_advisor, build_data_provider
 from risk.risk_manager import RiskManager
+from plan_exec import PlanExecutor
 
 logging.basicConfig(level="INFO", format="%(asctime)s [%(levelname)s] %(message)s")
 log = logging.getLogger(__name__)
@@ -245,6 +250,12 @@ def run(symbols: list[str] | None, interval: int = 60):
     # 최초 실행이라 watchlist가 비어있으면, 지금까지 수집된 종목으로 시드합니다
     # (이후로는 대시보드에서 관리 — collect_all.py로 전체 종목을 더 받아도 안 늘어남).
     store.seed_watchlist_if_empty(store.symbols())
+
+    # 매매 계획 실행 — 꺼져 있으면(기본) executor는 None이고 아래 동작은 전과 같습니다.
+    executor = None
+    if config.get("plan_follow", {}).get("enabled", False):
+        executor = PlanExecutor(config, store, broker, build_data_provider(config).fetch_quote)
+        executor.refresh(datetime.now(_KST).strftime("%Y-%m-%d"))  # 계획 종목을 관심종목에 먼저 넣어둠
     # 종목을 인자로 직접 준 경우엔 그 목록으로 고정하고, 아니면 매 확인 주기마다 관심종목을
     # 다시 읽습니다 (대시보드에서 종목을 추가/제거하면 재시작 없이 반영).
     fixed_symbols = list(symbols) if symbols else None
@@ -261,6 +272,8 @@ def run(symbols: list[str] | None, interval: int = 60):
     entry_prices: dict[str, float] = {}
 
     def _backfill_entry(symbol: str):
+        if executor is not None and executor.handles(symbol):
+            return  # 계획 매매 종목은 plan_trades의 진입가로 plan_exec가 관리
         # 이미 보유 중인 종목은 진짜 매수가를 모르므로(프로세스 재시작 시 메모리가 비워짐),
         # 지금 이 순간의 가격을 잠정 진입가로 써서 최소한 "지금부터"는 손절이 걸리게 합니다.
         try:
@@ -277,7 +290,8 @@ def run(symbols: list[str] | None, interval: int = 60):
     for symbol in symbols:
         _backfill_entry(symbol)
 
-    log.info(f"라이브 매매 감시 시작: {len(symbols)}종목, {interval}초 간격 (Ctrl+C로 종료)")
+    log.info(f"라이브 매매 감시 시작: {len(symbols)}종목, {interval}초 간격 (Ctrl+C로 종료), "
+             f"계획 실행 {'켜짐' if executor is not None else '꺼짐'}")
 
     prev_risk_settings = None
     try:
@@ -301,8 +315,10 @@ def run(symbols: list[str] | None, interval: int = 60):
                                 starting_cash=starting_cash)
             max_concurrent_positions = risk_settings["max_concurrent_positions"]
 
+            plan_symbols = executor.refresh(datetime.now(_KST).strftime("%Y-%m-%d")) if executor is not None else []
             if fixed_symbols is None:
-                current = store.get_watchlist()
+                watch = store.get_watchlist()
+                current = watch + [s for s in plan_symbols if s not in watch]
                 # 관심종목에서 뺐더라도 보유 중인(=손절 감시 중인) 종목은 청산될 때까지 계속 봅니다.
                 monitored = current + [s for s in entry_prices if s not in current]
                 if monitored != symbols:
@@ -315,6 +331,9 @@ def run(symbols: list[str] | None, interval: int = 60):
 
             for symbol in symbols:
                 try:
+                    if executor is not None and executor.handles(symbol):
+                        executor.check(symbol, risk, entry_prices, max_concurrent_positions, datetime.now(_KST))
+                        continue
                     _check_symbol(symbol, store, broker, risk, llm_advisor, config, last_signal,
                                    entry_prices, max_concurrent_positions)
                 except Exception as exc:  # 종목 하나 실패해도 나머지는 계속 진행
